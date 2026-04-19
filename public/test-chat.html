@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CodeForge Bot — Test Chat</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0a0a0f;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    gap: 24px;
+    padding: 20px;
+  }
+
+  /* ── Phone shell ─────────────────────────────────────────────────────── */
+  .phone {
+    width: 390px;
+    height: 844px;
+    background: #000;
+    border-radius: 44px;
+    border: 2px solid #2a2a2a;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 30px 80px rgba(0,0,0,.9), 0 0 0 1px #111;
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  /* Status bar */
+  .status-bar {
+    background: #000;
+    padding: 14px 24px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .status-bar .time  { color: #fff; font-size: 15px; font-weight: 600; }
+  .status-bar .icons { color: #fff; font-size: 12px; display: flex; gap: 5px; align-items: center; }
+
+  /* Instagram DM header */
+  .header {
+    background: #000;
+    border-bottom: 1px solid #1a1a1a;
+    padding: 10px 16px 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .back-btn { color: #fff; font-size: 22px; cursor: pointer; line-height: 1; }
+  .avatar {
+    width: 38px; height: 38px; border-radius: 50%;
+    background: linear-gradient(135deg, #833ab4, #fd1d1d, #fcb045);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; flex-shrink: 0;
+  }
+  .profile-info  { flex: 1; min-width: 0; }
+  .profile-name  { color: #fff; font-size: 14px; font-weight: 600; }
+  .profile-sub   { color: #8e8e8e; font-size: 12px; margin-top: 1px; }
+  .header-right  { display: flex; gap: 14px; align-items: center; }
+  .header-right span { color: #fff; font-size: 20px; cursor: pointer; }
+
+  /* State badge in header */
+  .state-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    background: #1a2a1a;
+    color: #4ade80;
+    border: 1px solid #2a4a2a;
+    white-space: nowrap;
+  }
+
+  /* ── Messages ────────────────────────────────────────────────────────── */
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: #000;
+    scroll-behavior: smooth;
+  }
+  .messages::-webkit-scrollbar { display: none; }
+
+  .msg {
+    max-width: 78%;
+    padding: 9px 14px;
+    border-radius: 22px;
+    font-size: 13.5px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .msg.user {
+    background: #3797f0;
+    color: #fff;
+    align-self: flex-end;
+    border-bottom-right-radius: 5px;
+  }
+  .msg.bot {
+    background: #1e1e1e;
+    color: #f0f0f0;
+    align-self: flex-start;
+    border-bottom-left-radius: 5px;
+  }
+  .msg.bot b { color: #ffffff; }
+  .msg.bot code {
+    background: #2a2a2a;
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: monospace;
+    font-size: 12px;
+    color: #a78bfa;
+  }
+  .msg.status {
+    background: transparent;
+    color: #555;
+    font-size: 11px;
+    align-self: center;
+    padding: 2px 0;
+  }
+  .msg.error {
+    background: #2a0a0a;
+    color: #f87171;
+    font-size: 12px;
+    align-self: center;
+    border-radius: 10px;
+    padding: 6px 14px;
+  }
+
+  /* Typing indicator */
+  .typing {
+    align-self: flex-start;
+    background: #1e1e1e;
+    padding: 10px 16px;
+    border-radius: 22px;
+    border-bottom-left-radius: 5px;
+    display: none;
+    margin: 0 16px 4px;
+  }
+  .typing.show { display: flex; gap: 4px; align-items: center; }
+  .typing span {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #8e8e8e;
+    animation: bounce 1.2s infinite;
+  }
+  .typing span:nth-child(2) { animation-delay: .2s; }
+  .typing span:nth-child(3) { animation-delay: .4s; }
+  @keyframes bounce {
+    0%,60%,100% { transform: translateY(0); }
+    30%          { transform: translateY(-5px); }
+  }
+
+  /* Quick replies */
+  .quick-replies {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    padding: 6px 16px 8px;
+    background: #000;
+    flex-shrink: 0;
+  }
+  .qr-chip {
+    background: #111;
+    border: 1px solid #2a2a2a;
+    color: #e0e0e0;
+    border-radius: 20px;
+    padding: 6px 13px;
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: all .12s;
+    white-space: nowrap;
+  }
+  .qr-chip:hover { background: #1e1e1e; border-color: #3797f0; color: #3797f0; }
+
+  /* Input area */
+  .input-area {
+    background: #000;
+    border-top: 1px solid #1a1a1a;
+    padding: 8px 12px 18px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .emoji-btn, .img-btn { color: #8e8e8e; font-size: 22px; cursor: pointer; flex-shrink: 0; }
+  .emoji-btn:hover, .img-btn:hover { color: #fff; }
+  .input-wrap {
+    flex: 1;
+    background: #111;
+    border: 1px solid #2a2a2a;
+    border-radius: 22px;
+    display: flex;
+    align-items: center;
+    padding: 7px 14px;
+    transition: border-color .15s;
+  }
+  .input-wrap:focus-within { border-color: #3797f0; }
+  .input-wrap input {
+    flex: 1;
+    background: none;
+    border: none;
+    outline: none;
+    color: #fff;
+    font-size: 13.5px;
+  }
+  .input-wrap input::placeholder { color: #555; }
+  .send-btn {
+    background: none;
+    border: none;
+    color: #3797f0;
+    font-size: 13.5px;
+    font-weight: 700;
+    cursor: pointer;
+    padding: 0 0 0 8px;
+    white-space: nowrap;
+  }
+  .send-btn:disabled { color: #333; cursor: default; }
+
+  /* ── Side panel ──────────────────────────────────────────────────────── */
+  .side-panel {
+    background: #0d0d1a;
+    border: 1px solid #1e1e3a;
+    border-radius: 16px;
+    padding: 18px;
+    width: 230px;
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    max-height: 844px;
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+  .side-panel::-webkit-scrollbar { width: 4px; }
+  .side-panel::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 2px; }
+
+  .panel-section { margin-bottom: 16px; }
+  .panel-label {
+    font-size: 10px;
+    color: #6060a0;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    font-size: 12.5px;
+    color: #a0a0c0;
+  }
+  .stat-val { font-weight: 700; color: #a78bfa; }
+  .stat-val.green { color: #4ade80; }
+  .stat-val.blue  { color: #60a5fa; }
+
+  .panel-divider { border: none; border-top: 1px solid #1e1e3a; margin: 12px 0; }
+
+  .tag {
+    display: inline-block;
+    background: #1a1a2e;
+    border: 1px solid #3a3a6a;
+    color: #a78bfa;
+    border-radius: 12px;
+    padding: 3px 9px;
+    font-size: 11px;
+    margin: 2px;
+  }
+  .tag.vip      { border-color: #5a3a00; color: #fbbf24; background: #1a0f00; }
+  .tag.frequent { border-color: #1a5a30; color: #4ade80; background: #0d1a12; }
+  .tag.referrer { border-color: #1a3a5a; color: #60a5fa; background: #0d1220; }
+
+  .cart-item {
+    font-size: 12px;
+    color: #c0c0e0;
+    padding: 4px 0;
+    border-bottom: 1px solid #1a1a2a;
+    display: flex;
+    justify-content: space-between;
+  }
+  .cart-item:last-child { border-bottom: none; }
+
+  .referral-code {
+    background: #111133;
+    border: 1px dashed #4a4a8a;
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-family: monospace;
+    font-size: 13px;
+    color: #a78bfa;
+    text-align: center;
+    letter-spacing: .05em;
+    cursor: pointer;
+    position: relative;
+  }
+  .referral-code:hover::after {
+    content: "Copy";
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    color: #60a5fa;
+    font-family: sans-serif;
+    letter-spacing: 0;
+  }
+
+  /* Reset button */
+  .reset-btn {
+    width: 100%;
+    background: #1a1a2e;
+    border: 1px solid #2a2a4a;
+    color: #8080c0;
+    border-radius: 8px;
+    padding: 8px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all .15s;
+    margin-top: 8px;
+  }
+  .reset-btn:hover { background: #2a0a0a; color: #f87171; border-color: #4a1a1a; }
+
+  /* Quick-test scenario buttons */
+  .scenario-btn {
+    width: 100%;
+    background: #111133;
+    border: 1px solid #2a2a4a;
+    color: #a0a0d0;
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 11.5px;
+    cursor: pointer;
+    transition: all .15s;
+    text-align: left;
+    margin-bottom: 5px;
+  }
+  .scenario-btn:hover { background: #1a1a3a; color: #c0c0ff; border-color: #6c47ff; }
+
+  @media (max-width: 700px) {
+    .side-panel { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Phone ─────────────────────────────────────────────────────────────── -->
+<div class="phone">
+  <div class="status-bar">
+    <span class="time" id="clock">9:41</span>
+    <div class="icons">
+      <span>▲▲▲</span>
+      <span>WiFi</span>
+      <span>🔋</span>
+    </div>
+  </div>
+
+  <div class="header">
+    <span class="back-btn">‹</span>
+    <div class="avatar">🛍️</div>
+    <div class="profile-info">
+      <div class="profile-name">TrendStore 🛍️</div>
+      <div class="profile-sub">Business Account · Active now</div>
+    </div>
+    <div class="header-right">
+      <span id="stateBadge" class="state-badge">idle</span>
+      <span title="Video call">🎥</span>
+    </div>
+  </div>
+
+  <div class="messages" id="messages">
+    <div class="msg status">Today</div>
+  </div>
+
+  <div class="typing" id="typing">
+    <span></span><span></span><span></span>
+  </div>
+
+  <div class="quick-replies" id="quickReplies"></div>
+
+  <div class="input-area">
+    <span class="emoji-btn">😊</span>
+    <div class="input-wrap">
+      <input type="text" id="msgInput" placeholder="Message..." autocomplete="off">
+      <button class="send-btn" id="sendBtn" onclick="sendMsg()" disabled>Send</button>
+    </div>
+    <span class="img-btn" title="Send image" onclick="document.getElementById('imgInput').click()">🖼️</span>
+    <input type="file" id="imgInput" accept="image/*" style="display:none" onchange="handleImagePick(this)">
+  </div>
+</div>
+
+<!-- ── Side panel ─────────────────────────────────────────────────────────── -->
+<div class="side-panel">
+
+  <div class="panel-section">
+    <div class="panel-label">🤖 Bot Customer</div>
+    <div class="stat-row"><span>Source</span>     <span class="stat-val blue">Instagram Bot</span></div>
+    <div class="stat-row"><span>Orders</span>     <span class="stat-val" id="statOrders">0</span></div>
+    <div class="stat-row"><span>Spend</span>      <span class="stat-val green" id="statSpend">₹0</span></div>
+    <div class="stat-row"><span>Referrals</span>  <span class="stat-val" id="statRefs">0</span></div>
+    <div class="stat-row"><span>Ref. Earnings</span><span class="stat-val green" id="statEarn">₹0</span></div>
+  </div>
+
+  <hr class="panel-divider">
+
+  <div class="panel-section">
+    <div class="panel-label">🎟️ Referral Code</div>
+    <div class="referral-code" id="refCode" onclick="copyRefCode()" title="Click to copy">—</div>
+  </div>
+
+  <hr class="panel-divider">
+
+  <div class="panel-section">
+    <div class="panel-label">🛒 Cart</div>
+    <div id="statCart" style="color:#555;font-size:12px">Empty</div>
+  </div>
+
+  <hr class="panel-divider">
+
+  <div class="panel-section">
+    <div class="panel-label">🏷️ Tags</div>
+    <div id="statTags"><span class="tag">new</span></div>
+  </div>
+
+  <hr class="panel-divider">
+
+  <!-- Quick-test scenarios -->
+  <div class="panel-section">
+    <div class="panel-label">⚡ Quick Tests</div>
+    <button class="scenario-btn" onclick="runScenario('search')">🔍 Search: jeans under ₹800</button>
+    <button class="scenario-btn" onclick="runScenario('kurti')">👗 Search: cotton kurti size M</button>
+    <button class="scenario-btn" onclick="runScenario('track')">📦 Track my order</button>
+    <button class="scenario-btn" onclick="runScenario('history')">📋 My order history</button>
+    <button class="scenario-btn" onclick="runScenario('referral')">🎟️ My referral code</button>
+    <button class="scenario-btn" onclick="runScenario('return')">🔄 I want to return</button>
+  </div>
+
+  <button class="reset-btn" onclick="resetConversation()">↺ New Customer Session</button>
+
+  <div style="margin-top:10px;font-size:10px;color:#404060;text-align:center" id="userIdLabel"></div>
+</div>
+
+<script>
+  let SUBSCRIBER_ID = "test_" + Math.random().toString(36).slice(2, 8);
+  const SERVER = "http://localhost:3000";
+
+  const $msgs   = document.getElementById("messages");
+  const $input  = document.getElementById("msgInput");
+  const $send   = document.getElementById("sendBtn");
+  const $typing = document.getElementById("typing");
+  const $qr     = document.getElementById("quickReplies");
+
+  document.getElementById("userIdLabel").textContent = "ID: " + SUBSCRIBER_ID;
+
+  // ── Clock ─────────────────────────────────────────────────────────────────
+  function updateClock() {
+    const n = new Date();
+    document.getElementById("clock").textContent =
+      n.getHours() + ":" + String(n.getMinutes()).padStart(2, "0");
+  }
+  updateClock();
+  setInterval(updateClock, 10000);
+
+  // ── Input ─────────────────────────────────────────────────────────────────
+  $input.addEventListener("input",  () => { $send.disabled = !$input.value.trim(); });
+  $input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); } });
+
+  // ── Render helpers ────────────────────────────────────────────────────────
+  function escHtml(s) {
+    return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  function renderText(text) {
+    return escHtml(text)
+      .replace(/\*(.*?)\*/g,   "<b>$1</b>")          // *bold*
+      .replace(/`(.*?)`/g,     "<code>$1</code>")     // `code`
+      .replace(/_(.*?)_/g,     "<i style='color:#aaa'>$1</i>") // _italic_
+      .replace(/\n/g,           "<br>");
+  }
+
+  function addMsg(text, type) {
+    const d = document.createElement("div");
+    d.className = "msg " + type;
+    if (type === "bot" || type === "status" || type === "error") {
+      d.innerHTML = renderText(text);
+    } else {
+      d.textContent = text;
+    }
+    $msgs.appendChild(d);
+    $msgs.scrollTop = $msgs.scrollHeight;
+    return d;
+  }
+
+  function showTyping() {
+    $typing.classList.add("show");
+    $msgs.scrollTop = $msgs.scrollHeight;
+  }
+  function hideTyping() { $typing.classList.remove("show"); }
+
+  function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  // ── Send message ──────────────────────────────────────────────────────────
+  async function sendMsg() {
+    const text = $input.value.trim();
+    if (!text) return;
+    $input.value  = "";
+    $send.disabled = true;
+    $qr.innerHTML  = "";
+
+    addMsg(text, "user");
+    showTyping();
+
+    try {
+      const res  = await fetch(`${SERVER}/test/chat`, {
+        method : "POST",
+        headers: { "Content-Type": "application/json" },
+        body   : JSON.stringify({ subscriber_id: SUBSCRIBER_ID, text, first_name: "TestUser" }),
+      });
+      const data = await res.json();
+      hideTyping();
+
+      for (const reply of (data.replies || [])) {
+        await delay(250);
+        addMsg(reply, "bot");
+      }
+
+      updateQuickReplies(data.quickReplies || []);
+      updateStateBadge(data.sessionState);
+      if (data.customer) updateStats(data.customer);
+      if (data.cart !== undefined) updateCart(data.cart);
+
+    } catch (err) {
+      hideTyping();
+      addMsg("⚠️ Cannot reach server. Run: node src/server.js", "error");
+    }
+  }
+
+  // ── Quick reply chips ─────────────────────────────────────────────────────
+  function updateQuickReplies(replies) {
+    if (!replies.length) {
+      // Default chips when no state-specific replies
+      replies = ["👖 jeans", "👗 kurti", "👕 t-shirt", "📦 track order", "📋 my orders"];
+    }
+    $qr.innerHTML = replies.map(r =>
+      `<div class="qr-chip" onclick="sendQuick('${r.replace(/'/g, "\\'")}')">${renderText(r)}</div>`
+    ).join("");
+  }
+
+  function sendQuick(text) {
+    $input.value = text;
+    sendMsg();
+  }
+
+  // ── State badge ───────────────────────────────────────────────────────────
+  function updateStateBadge(state) {
+    const badge = document.getElementById("stateBadge");
+    const colors = {
+      idle              : ["#1a2a1a", "#4ade80", "#2a4a2a"],
+      searching         : ["#1a1a2a", "#a78bfa", "#3a3a5a"],
+      selecting         : ["#1a2a1a", "#60a5fa", "#1a3a5a"],
+      sizing            : ["#1a2a00", "#fbbf24", "#4a4a00"],
+      collecting_address: ["#2a1a00", "#fb923c", "#5a3a00"],
+      collecting_mobile : ["#2a1a00", "#fb923c", "#5a3a00"],
+      awaiting_payment  : ["#2a1a1a", "#f87171", "#5a2a2a"],
+    };
+    const [bg, fg, border] = colors[state] || ["#111122", "#8080a0", "#2a2a4a"];
+    badge.textContent = state || "idle";
+    badge.style.background   = bg;
+    badge.style.color        = fg;
+    badge.style.borderColor  = border;
+  }
+
+  // ── Side panel updates ────────────────────────────────────────────────────
+  function updateStats(customer) {
+    document.getElementById("statOrders").textContent = customer.totalOrders || 0;
+    document.getElementById("statSpend").textContent  = "₹" + (customer.totalSpend || 0);
+    document.getElementById("statRefs").textContent   = customer.referralCount || 0;
+    document.getElementById("statEarn").textContent   = "₹" + (customer.referralEarnings || 0);
+    document.getElementById("refCode").textContent    = customer.referralCode || "—";
+
+    const tags = customer.tags?.length ? customer.tags : ["new"];
+    document.getElementById("statTags").innerHTML =
+      tags.map(t => `<span class="tag ${t}">${t}</span>`).join("");
+  }
+
+  function updateCart(cart) {
+    const el = document.getElementById("statCart");
+    if (!cart?.length) { el.innerHTML = "<span style='color:#555;font-size:12px'>Empty</span>"; return; }
+    el.innerHTML = cart.map(i =>
+      `<div class="cart-item">
+        <span>${i.name}${i.selectedSize ? ` <b>(${i.selectedSize})</b>` : ""}</span>
+        <span style="color:#a78bfa">₹${i.price}</span>
+      </div>`
+    ).join("");
+  }
+
+  function copyRefCode() {
+    const code = document.getElementById("refCode").textContent;
+    if (code && code !== "—") {
+      navigator.clipboard?.writeText(code).then(() => {
+        const el = document.getElementById("refCode");
+        const orig = el.textContent;
+        el.textContent = "✓ Copied!";
+        setTimeout(() => el.textContent = orig, 1500);
+      });
+    }
+  }
+
+  // ── Image upload ──────────────────────────────────────────────────────────
+  async function handleImagePick(input) {
+    const file = input.files[0];
+    if (!file) return;
+    addMsg("🖼️ [Product image]", "user");
+    showTyping();
+    // Use a placeholder URL since we can't upload binary in test mode
+    const imageUrl = URL.createObjectURL(file);
+    try {
+      const res  = await fetch(`${SERVER}/test/chat`, {
+        method : "POST",
+        headers: { "Content-Type": "application/json" },
+        body   : JSON.stringify({
+          subscriber_id: SUBSCRIBER_ID,
+          first_name   : "TestUser",
+          attachments  : [{ url: imageUrl, type: "image" }],
+        }),
+      });
+      const data = await res.json();
+      hideTyping();
+      for (const reply of (data.replies || [])) {
+        await delay(300);
+        addMsg(reply, "bot");
+      }
+    } catch {
+      hideTyping();
+      addMsg("⚠️ Image send failed — check server", "error");
+    }
+    input.value = "";
+  }
+
+  // ── Quick-test scenarios ──────────────────────────────────────────────────
+  const SCENARIOS = {
+    search  : "jeans under 800",
+    kurti   : "cotton kurti size M",
+    track   : "track my order",
+    history : "my orders",
+    referral: "what is my referral code",
+    return  : "I want to return my order",
+  };
+  function runScenario(key) {
+    const text = SCENARIOS[key];
+    if (text) { $input.value = text; sendMsg(); }
+  }
+
+  // ── Reset conversation ────────────────────────────────────────────────────
+  function resetConversation() {
+    SUBSCRIBER_ID = "test_" + Math.random().toString(36).slice(2, 8);
+    document.getElementById("userIdLabel").textContent = "ID: " + SUBSCRIBER_ID;
+
+    $msgs.innerHTML = '<div class="msg status">New session started</div>';
+    $qr.innerHTML   = "";
+    updateStateBadge("idle");
+    updateStats({ totalOrders:0, totalSpend:0, referralCount:0, referralEarnings:0, referralCode:"—", tags:[] });
+    updateCart([]);
+
+    // Show welcome after a beat
+    setTimeout(() => {
+      addMsg(
+        "Hey! 👋 Welcome to *TrendStore*.\n\n" +
+        "I'm your personal shopping assistant. Tell me what you're looking for!\n\n" +
+        "Example: _\"blue jeans under ₹800\"_ or _\"cotton kurti size M\"_",
+        "bot"
+      );
+      updateQuickReplies([]);
+    }, 400);
+  }
+
+  // ── Init: show welcome ────────────────────────────────────────────────────
+  resetConversation();
+  // Override the "New session started" text on first load
+  $msgs.querySelector(".msg.status").textContent = "Today";
+</script>
+</body>
+</html>

@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CodeForge — Business Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0a0a0f;color:#e0e0ff;min-height:100vh}
+
+/* Layout */
+.shell{display:flex;min-height:100vh}
+.sidebar{width:220px;background:#0d0d1a;border-right:1px solid #1e1e3a;padding:20px 0;flex-shrink:0;position:fixed;height:100vh;overflow-y:auto}
+.main{margin-left:220px;flex:1;padding:28px;overflow-x:hidden}
+
+/* Sidebar */
+.logo{padding:0 20px 24px;border-bottom:1px solid #1e1e3a;margin-bottom:16px}
+.logo h2{font-size:16px;font-weight:700;color:#fff}
+.logo span{font-size:11px;color:#6060a0}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 20px;cursor:pointer;font-size:13px;color:#8080c0;border-left:3px solid transparent;transition:all .15s}
+.nav-item:hover{background:#13132a;color:#c0c0ff}
+.nav-item.active{background:#13132a;color:#fff;border-left-color:#6c47ff}
+.nav-item .icon{font-size:16px;width:20px;text-align:center}
+.nav-section{padding:12px 20px 6px;font-size:10px;color:#404060;text-transform:uppercase;letter-spacing:.08em}
+
+/* Header */
+.page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
+.page-header h1{font-size:20px;font-weight:700}
+.page-header span{font-size:13px;color:#6060a0}
+.btn{padding:9px 18px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;transition:opacity .15s}
+.btn:hover{opacity:.85}
+.btn-primary{background:#6c47ff;color:#fff}
+.btn-success{background:#22c55e;color:#fff}
+.btn-danger{background:#ef4444;color:#fff}
+.btn-ghost{background:#1e1e3a;color:#a0a0d0;border:1px solid #2a2a4a}
+.btn-sm{padding:6px 12px;font-size:12px}
+
+/* Stats cards */
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:28px}
+.stat-card{background:#0d0d1a;border:1px solid #1e1e3a;border-radius:12px;padding:18px}
+.stat-card .label{font-size:12px;color:#6060a0;margin-bottom:8px}
+.stat-card .value{font-size:26px;font-weight:700;color:#fff}
+.stat-card .sub{font-size:12px;color:#4ade80;margin-top:4px}
+.stat-card .sub.red{color:#f87171}
+.stat-card.purple{border-color:#6c47ff44;background:#0d0d1a}
+
+/* Tables */
+.card{background:#0d0d1a;border:1px solid #1e1e3a;border-radius:12px;overflow:hidden;margin-bottom:24px}
+.card-header{padding:16px 20px;border-bottom:1px solid #1e1e3a;display:flex;align-items:center;justify-content:space-between}
+.card-header h3{font-size:14px;font-weight:600}
+table{width:100%;border-collapse:collapse}
+th{padding:11px 16px;text-align:left;font-size:12px;color:#6060a0;border-bottom:1px solid #1e1e3a;font-weight:500;text-transform:uppercase;letter-spacing:.04em}
+td{padding:13px 16px;font-size:13px;border-bottom:1px solid #13132a}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#0f0f20}
+
+/* Status badges */
+.badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600}
+.badge-pending{background:#2a1a00;color:#fbbf24;border:1px solid #5a3a00}
+.badge-confirmed{background:#0d2a1a;color:#4ade80;border:1px solid #1a5a30}
+.badge-shipped{background:#0d1a2a;color:#60a5fa;border:1px solid #1a3a5a}
+.badge-delivered{background:#1a0d2a;color:#a78bfa;border:1px solid #3a1a5a}
+.badge-cancelled{background:#2a0d0d;color:#f87171;border:1px solid #5a1a1a}
+.badge-vip{background:#2a1a00;color:#f59e0b;border:1px solid #5a3a00}
+.badge-new{background:#0d1a2a;color:#60a5fa;border:1px solid #1a3a5a}
+
+/* Tabs */
+.tabs{display:flex;gap:4px;background:#06060f;padding:4px;border-radius:10px;margin-bottom:20px;width:fit-content}
+.tab{padding:8px 16px;border-radius:7px;font-size:13px;cursor:pointer;color:#6060a0;transition:all .15s;border:none;background:none}
+.tab.active{background:#1e1e3a;color:#fff}
+
+/* Forms */
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.form-group{display:flex;flex-direction:column;gap:5px}
+.form-group label{font-size:12px;color:#8080a0}
+.form-group input,.form-group select,.form-group textarea{background:#06060f;border:1px solid #1e1e3a;border-radius:7px;color:#e0e0ff;font-size:13px;padding:8px 12px;outline:none;font-family:inherit}
+.form-group input:focus,.form-group select:focus,.form-group textarea:focus{border-color:#6c47ff}
+.form-group textarea{resize:vertical;min-height:70px}
+
+/* Modal */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:#0d0d1a;border:1px solid #2a2a4a;border-radius:16px;padding:24px;width:480px;max-height:90vh;overflow-y:auto}
+.modal h3{font-size:16px;font-weight:700;margin-bottom:16px}
+
+/* Promotion panel */
+.promo-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}
+.promo-card{background:#0d0d1a;border:1px solid #1e1e3a;border-radius:12px;padding:18px;cursor:pointer;transition:border-color .15s}
+.promo-card:hover{border-color:#6c47ff}
+.promo-card .icon{font-size:28px;margin-bottom:10px}
+.promo-card h4{font-size:14px;font-weight:600;margin-bottom:4px}
+.promo-card p{font-size:12px;color:#6060a0;line-height:1.5}
+.promo-card .stat{font-size:20px;font-weight:700;color:#6c47ff;margin-top:10px}
+
+/* Chart placeholder */
+.chart-bar{display:flex;align-items:flex-end;gap:8px;height:80px;padding:0 4px}
+.bar{flex:1;background:linear-gradient(to top,#6c47ff,#a78bfa);border-radius:4px 4px 0 0;min-width:20px;transition:height .3s}
+
+/* Flash sale textarea */
+#flashMsg{width:100%;background:#06060f;border:1px solid #1e1e3a;border-radius:8px;color:#e0e0ff;font-size:13px;padding:10px;resize:vertical;min-height:80px;outline:none;font-family:inherit}
+
+/* Alert */
+.alert{padding:12px 16px;border-radius:8px;font-size:13px;margin-bottom:16px;display:none}
+.alert.show{display:block}
+.alert-success{background:#0d2a1a;color:#4ade80;border:1px solid #1a5a30}
+.alert-info{background:#0d1a2a;color:#60a5fa;border:1px solid #1a3a5a}
+
+/* Empty state */
+.empty{text-align:center;padding:48px 20px;color:#4040607}
+.empty .icon{font-size:40px;margin-bottom:12px}
+.empty p{color:#6060a0;font-size:13px}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:#0a0a0f}
+::-webkit-scrollbar-thumb{background:#2a2a4a;border-radius:3px}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<!-- Sidebar -->
+<div class="sidebar">
+  <div class="logo">
+    <h2>🤖 CodeForge</h2>
+    <span>Instagram Business Bot</span>
+  </div>
+  <div class="nav-section">Main</div>
+  <div class="nav-item active" onclick="showPage('overview')"><span class="icon">📊</span> Overview</div>
+  <div class="nav-item" onclick="showPage('orders')"><span class="icon">📦</span> Orders</div>
+  <div class="nav-item" onclick="showPage('customers')"><span class="icon">👥</span> Customers</div>
+  <div class="nav-section">Store</div>
+  <div class="nav-item" onclick="showPage('catalog')"><span class="icon">🛍️</span> Catalog</div>
+  <div class="nav-item" onclick="showPage('promotion')"><span class="icon">📣</span> Promotions</div>
+  <div class="nav-section">Tools</div>
+  <div class="nav-item" onclick="window.open('test-chat.html','_blank')"><span class="icon">💬</span> Test Bot</div>
+  <div class="nav-item" onclick="showPage('billing')"><span class="icon">💳</span> Billing</div>
+  <div class="nav-item" onclick="showPage('settings')"><span class="icon">⚙️</span> Settings</div>
+</div>
+
+<!-- Main content -->
+<div class="main">
+
+  <!-- OVERVIEW PAGE -->
+  <div id="page-overview">
+    <div class="page-header">
+      <div><h1>Overview</h1><span id="dateStr"></span></div>
+      <button class="btn btn-primary" onclick="refreshAll()">↻ Refresh</button>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card purple">
+        <div class="label">Bot Customers</div>
+        <div class="value" id="st-customers">—</div>
+        <div class="sub" id="st-customers-new">+0 today</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Total Orders</div>
+        <div class="value" id="st-orders">—</div>
+        <div class="sub" id="st-orders-pending">0 pending</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Today's Revenue</div>
+        <div class="value" id="st-revenue">—</div>
+        <div class="sub" id="st-revenue-total">₹0 total</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Referrals Generated</div>
+        <div class="value" id="st-referrals">—</div>
+        <div class="sub" id="st-referrers">0 active referrers</div>
+      </div>
+    </div>
+
+    <!-- Recent orders -->
+    <div class="card">
+      <div class="card-header">
+        <h3>Recent Orders</h3>
+        <button class="btn btn-ghost btn-sm" onclick="showPage('orders')">View all →</button>
+      </div>
+      <table>
+        <thead><tr><th>Order ID</th><th>Customer</th><th>Items</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead>
+        <tbody id="recent-orders-body">
+          <tr><td colspan="6" style="text-align:center;color:#4040607;padding:32px">No orders yet — test the bot!</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Top customers -->
+    <div class="card">
+      <div class="card-header"><h3>Top Bot Customers</h3></div>
+      <table>
+        <thead><tr><th>Customer</th><th>Orders</th><th>Total Spend</th><th>Referrals</th><th>Tags</th></tr></thead>
+        <tbody id="top-customers-body">
+          <tr><td colspan="5" style="text-align:center;color:#404060;padding:32px">No customers yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ORDERS PAGE -->
+  <div id="page-orders" style="display:none">
+    <div class="page-header">
+      <h1>Orders</h1>
+      <div style="display:flex;gap:8px">
+        <select id="orderFilter" onchange="loadOrders()" style="background:#0d0d1a;border:1px solid #1e1e3a;color:#e0e0ff;border-radius:7px;padding:8px 12px;font-size:13px">
+          <option value="">All Status</option>
+          <option value="pending_payment">Pending Payment</option>
+          <option value="confirmed">Confirmed</option>
+          <option value="packed">Packed</option>
+          <option value="shipped">Shipped</option>
+          <option value="delivered">Delivered</option>
+        </select>
+      </div>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>Order ID</th><th>Customer</th><th>Items</th><th>Amount</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody id="orders-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- CUSTOMERS PAGE -->
+  <div id="page-customers" style="display:none">
+    <div class="page-header">
+      <h1>Bot Customers</h1>
+      <span style="background:#1e1e3a;padding:6px 12px;border-radius:20px;font-size:12px">📍 Source: Instagram Bot only</span>
+    </div>
+
+    <div class="stats-grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="stat-card"><div class="label">Total Bot Customers</div><div class="value" id="c-total">—</div></div>
+      <div class="stat-card"><div class="label">New This Week</div><div class="value" id="c-week">—</div></div>
+      <div class="stat-card"><div class="label">Total Revenue (Bot)</div><div class="value" id="c-revenue">—</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h3>All Customers</h3>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" onclick="loadCustomers('vip')">⭐ VIP</button>
+          <button class="btn btn-ghost btn-sm" onclick="loadCustomers('referrer')">🔗 Referrers</button>
+          <button class="btn btn-ghost btn-sm" onclick="loadCustomers()">All</button>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th>Name</th><th>Joined</th><th>Orders</th><th>Total Spend</th><th>Referral Code</th><th>Referrals</th><th>Tags</th></tr></thead>
+        <tbody id="customers-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- CATALOG PAGE -->
+  <div id="page-catalog" style="display:none">
+    <div class="page-header">
+      <h1>Product Catalog</h1>
+      <button class="btn btn-primary" onclick="openAddProduct()">+ Add Product</button>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>Name</th><th>Price</th><th>Category</th><th>Sizes</th><th>Colors</th><th>Stock</th><th>Action</th></tr></thead>
+        <tbody id="catalog-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- PROMOTION PAGE -->
+  <div id="page-promotion" style="display:none">
+    <div class="page-header"><h1>Promotions</h1></div>
+    <div id="alert-promo" class="alert alert-success"></div>
+
+    <div class="promo-grid">
+      <div class="promo-card" onclick="openFlashSale()">
+        <div class="icon">🔥</div>
+        <h4>Flash Sale Broadcaster</h4>
+        <p>Send a sale announcement to all past customers instantly via DM</p>
+        <div class="stat" id="promo-customers">0 customers</div>
+      </div>
+      <div class="promo-card" onclick="openNewArrival()">
+        <div class="icon">🆕</div>
+        <h4>New Arrival Alert</h4>
+        <p>Notify relevant past customers when you add a new product</p>
+        <div class="stat" id="promo-products">0 products</div>
+      </div>
+      <div class="promo-card">
+        <div class="icon">🔗</div>
+        <h4>Referral Engine</h4>
+        <p>Auto-generates referral codes for every customer. 5% commission per order</p>
+        <div class="stat" id="promo-referrals">0 referrals made</div>
+      </div>
+      <div class="promo-card">
+        <div class="icon">🛒</div>
+        <h4>Abandoned Cart</h4>
+        <p>Bot auto follow-up 2 hours after customer stops mid-order</p>
+        <div class="stat" id="promo-abandoned">0 recovered</div>
+      </div>
+    </div>
+
+    <!-- Referral leaderboard -->
+    <div class="card">
+      <div class="card-header"><h3>🏆 Top Referrers</h3></div>
+      <table>
+        <thead><tr><th>Customer</th><th>Referral Code</th><th>Friends Referred</th><th>Earnings</th></tr></thead>
+        <tbody id="referrers-body">
+          <tr><td colspan="4" style="text-align:center;color:#404060;padding:24px">No referrals yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- BILLING PAGE -->
+  <div id="page-billing" style="display:none">
+    <div class="page-header">
+      <h1>Billing</h1>
+      <span id="sub-status-badge" style="padding:6px 16px;border-radius:20px;font-size:12px;font-weight:700;background:#1a2a1a;color:#4ade80;border:1px solid #2a4a2a">● Active</span>
+    </div>
+
+    <!-- Subscription card -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
+      <div class="stat-card purple">
+        <div class="label">Monthly Subscription</div>
+        <div class="value" id="bill-monthly">₹3,000</div>
+        <div class="sub" id="bill-days">— days remaining</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Promo Commission (this month)</div>
+        <div class="value" id="bill-commission">₹0</div>
+        <div class="sub">5% on promo orders &gt; ₹1,000</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Total Due This Month</div>
+        <div class="value" id="bill-total" style="color:#f59e0b">₹3,000</div>
+        <div class="sub" id="bill-period">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Plan</div>
+        <div class="value" style="font-size:18px">Starter</div>
+        <div class="sub green">Unlimited bot customers</div>
+      </div>
+    </div>
+
+    <!-- Commission breakdown -->
+    <div class="card" style="margin-bottom:24px">
+      <div class="card-header">
+        <h3>Commission Breakdown — This Month</h3>
+        <span style="font-size:12px;color:#6060a0">Only on promo-driven orders with items &gt; ₹1,000</span>
+      </div>
+      <table>
+        <thead><tr><th>Order ID</th><th>Triggered By</th><th>Date</th><th>Item Value</th><th>Commission (5%)</th></tr></thead>
+        <tbody id="commission-body">
+          <tr><td colspan="5" style="text-align:center;color:#404060;padding:32px">No commissions yet this month</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Pricing rules card -->
+    <div class="card" style="max-width:520px;padding:0">
+      <div class="card-header"><h3>Your Pricing Plan</h3></div>
+      <div style="padding:20px">
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div style="display:flex;align-items:flex-start;gap:14px">
+            <div style="width:36px;height:36px;background:#6c47ff22;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">📅</div>
+            <div>
+              <div style="font-weight:600;margin-bottom:2px">₹3,000 / month</div>
+              <div style="font-size:12px;color:#6060a0">Flat monthly subscription. Full access to bot, catalog, orders, promotions & analytics.</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:flex-start;gap:14px">
+            <div style="width:36px;height:36px;background:#f59e0b22;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">⚡</div>
+            <div>
+              <div style="font-weight:600;margin-bottom:2px">5% commission on promo-driven sales above ₹1,000</div>
+              <div style="font-size:12px;color:#6060a0">Charged only when the bot's promotions (flash sale, new arrival, abandoned cart, referral) directly drive a sale of an item priced above ₹1,000. Organic orders — never charged.</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:flex-start;gap:14px">
+            <div style="width:36px;height:36px;background:#4ade8022;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">🎁</div>
+            <div>
+              <div style="font-weight:600;margin-bottom:2px">14-day free trial</div>
+              <div style="font-size:12px;color:#6060a0">No credit card needed to start. Full access during trial.</div>
+            </div>
+          </div>
+        </div>
+        <button class="btn btn-primary" style="width:100%;margin-top:20px" onclick="openRenewModal()">
+          Renew Subscription →
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Renew Modal -->
+  <div class="modal-overlay" id="modalRenew">
+    <div class="modal" style="width:420px">
+      <h3>Renew Subscription</h3>
+      <div style="background:#06060f;border:1px solid #1e1e3a;border-radius:10px;padding:16px;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:13px">
+          <span style="color:#8080a0">Monthly subscription</span><span>₹3,000</span>
+        </div>
+        <div style="border-top:1px solid #1e1e3a;padding-top:8px;display:flex;justify-content:space-between;font-weight:700">
+          <span>Total</span><span style="color:#6c47ff">₹3,000</span>
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:16px">
+        <label>Payment Reference / Transaction ID</label>
+        <input id="paymentRef" placeholder="e.g. pay_AbCdEf123456">
+      </div>
+      <p style="font-size:12px;color:#6060a0;margin-bottom:16px">Pay via UPI / bank transfer and enter the transaction ID above. Your subscription will be activated immediately after verification.</p>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-ghost" onclick="closeModal('modalRenew')">Cancel</button>
+        <button class="btn btn-primary" onclick="submitRenewal()">Submit Payment</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SETTINGS PAGE -->
+  <div id="page-settings" style="display:none">
+    <div class="page-header"><h1>Settings</h1></div>
+    <div class="card" style="padding:24px;max-width:500px">
+      <h3 style="margin-bottom:16px;font-size:14px">Business Details</h3>
+      <div class="form-group" style="margin-bottom:12px">
+        <label>Business Name</label>
+        <input type="text" id="bizName" placeholder="e.g. TrendStore">
+      </div>
+      <div class="form-group" style="margin-bottom:12px">
+        <label>GST Number</label>
+        <input type="text" id="bizGST" placeholder="e.g. 27AABCU9603R1ZX">
+      </div>
+      <div class="form-group" style="margin-bottom:12px">
+        <label>Delivery Charge (₹)</label>
+        <input type="number" id="bizDelivery" value="49">
+      </div>
+      <div class="form-group" style="margin-bottom:12px">
+        <label>Free Delivery Above (₹)</label>
+        <input type="number" id="bizFreeDelivery" value="999">
+      </div>
+      <div class="form-group" style="margin-bottom:16px">
+        <label>Referral Commission (%)</label>
+        <input type="number" id="bizCommission" value="5">
+      </div>
+      <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+    </div>
+  </div>
+
+</div><!-- /main -->
+</div><!-- /shell -->
+
+<!-- Add Product Modal -->
+<div class="modal-overlay" id="modalProduct">
+  <div class="modal">
+    <h3>Add Product</h3>
+    <div class="form-group" style="margin-bottom:14px">
+      <label>📸 Instagram Post URL <span style="color:#6060a0;font-weight:400">(paste your post link — image & name auto-fill)</span></label>
+      <input id="p-instaurl" placeholder="https://www.instagram.com/p/AbCdEf123/" oninput="onInstaUrlChange(this)">
+    </div>
+    <div id="insta-preview" style="display:none;background:#06060f;border:1px solid #1e1e3a;border-radius:8px;padding:10px;margin-bottom:14px;font-size:12px;color:#8080c0">
+      ⏳ Fetching post details...
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Product Name *</label><input id="p-name" placeholder="e.g. Blue Slim Jeans"></div>
+      <div class="form-group"><label>Price (₹) *</label><input id="p-price" type="number" placeholder="799"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Category *</label><input id="p-cat" placeholder="e.g. jeans, kurti, shirt"></div>
+      <div class="form-group"><label>Material</label><input id="p-material" placeholder="e.g. cotton, denim"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Sizes (comma separated)</label><input id="p-sizes" placeholder="S,M,L,XL or 28,30,32"></div>
+      <div class="form-group"><label>Colors (comma separated)</label><input id="p-colors" placeholder="Blue,Black,Red"></div>
+    </div>
+    <div class="form-group" style="margin-bottom:16px">
+      <label>Image URL <span style="color:#6060a0;font-weight:400">(auto-filled from post, or paste manually)</span></label>
+      <input id="p-image" placeholder="https://...">
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="closeModal('modalProduct')">Cancel</button>
+      <button class="btn btn-primary" onclick="addProduct()">Add Product</button>
+    </div>
+  </div>
+</div>
+
+<!-- Flash Sale Modal -->
+<div class="modal-overlay" id="modalFlash">
+  <div class="modal">
+    <h3>🔥 Flash Sale Broadcaster</h3>
+    <p style="font-size:13px;color:#8080a0;margin-bottom:16px">This message will be sent to ALL past bot customers via DM</p>
+    <div class="form-group" style="margin-bottom:8px">
+      <label>Sale Message</label>
+      <textarea id="flashMsg" placeholder="🔥 FLASH SALE — Today Only!&#10;50% OFF on all jeans!&#10;Use code: FLASH50&#10;Valid till midnight ⏰"></textarea>
+    </div>
+    <p style="font-size:12px;color:#6060a0;margin-bottom:16px" id="flashRecipients">Will reach 0 customers</p>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="closeModal('modalFlash')">Cancel</button>
+      <button class="btn btn-danger" onclick="sendFlashSale()">🔥 Send to All</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Arrival Modal -->
+<div class="modal-overlay" id="modalArrival">
+  <div class="modal">
+    <h3>🆕 New Arrival Alert</h3>
+    <p style="font-size:13px;color:#8080a0;margin-bottom:16px">Select a product — bot will notify customers who bought similar items</p>
+    <div class="form-group" style="margin-bottom:16px">
+      <label>Select Product</label>
+      <select id="arrivalProduct" style="background:#06060f;border:1px solid #1e1e3a;color:#e0e0ff;border-radius:7px;padding:8px 12px;font-size:13px;width:100%"></select>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="closeModal('modalArrival')">Cancel</button>
+      <button class="btn btn-primary" onclick="sendNewArrival()">Send Alert</button>
+    </div>
+  </div>
+</div>
+
+<!-- Update Status Modal -->
+<div class="modal-overlay" id="modalStatus">
+  <div class="modal">
+    <h3>Update Order Status</h3>
+    <input type="hidden" id="statusOrderId">
+    <div class="form-group" style="margin-bottom:12px">
+      <label>New Status</label>
+      <select id="statusSelect" style="background:#06060f;border:1px solid #1e1e3a;color:#e0e0ff;border-radius:7px;padding:8px 12px;font-size:13px;width:100%">
+        <option value="confirmed">✅ Confirmed</option>
+        <option value="packed">📦 Packed</option>
+        <option value="shipped">🚚 Shipped</option>
+        <option value="out_for_delivery">🛵 Out for Delivery</option>
+        <option value="delivered">✅ Delivered</option>
+        <option value="cancelled">❌ Cancelled</option>
+      </select>
+    </div>
+    <div class="form-group" style="margin-bottom:12px">
+      <label>Tracking Number (optional)</label>
+      <input id="trackingNum" placeholder="e.g. DEL123456789">
+    </div>
+    <p style="font-size:12px;color:#4ade80;margin-bottom:16px">✓ Customer will be notified via Instagram DM automatically</p>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="closeModal('modalStatus')">Cancel</button>
+      <button class="btn btn-primary" onclick="updateStatus()">Update & Notify Customer</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = 'http://localhost:3000';
+
+// ── Page navigation ─────────────────────────────────────────────────────────
+function showPage(page) {
+  document.querySelectorAll('[id^="page-"]').forEach(el => el.style.display = 'none');
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('page-' + page).style.display = 'block';
+  event?.target?.closest('.nav-item')?.classList.add('active');
+
+  if (page === 'overview')   loadOverview();
+  if (page === 'orders')     loadOrders();
+  if (page === 'customers')  loadCustomers();
+  if (page === 'catalog')    loadCatalog();
+  if (page === 'promotion')  loadPromotion();
+  if (page === 'billing')    loadBilling();
+}
+
+function refreshAll() {
+  const visible = document.querySelector('[id^="page-"]:not([style*="none"])');
+  if (visible) showPage(visible.id.replace('page-',''));
+}
+
+// ── Date ────────────────────────────────────────────────────────────────────
+document.getElementById('dateStr').textContent =
+  new Date().toLocaleDateString('en-IN',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+
+// ── Overview ─────────────────────────────────────────────────────────────────
+async function loadOverview() {
+  const [orderData, custData] = await Promise.all([
+    fetch(`${API}/api/orders`).then(r=>r.json()).catch(()=>({stats:{},orders:[]})),
+    fetch(`${API}/api/customers`).then(r=>r.json()).catch(()=>({stats:{},customers:[]})),
+  ]);
+
+  const os = orderData.stats || {};
+  const cs = custData.stats  || {};
+
+  setText('st-customers', cs.total || 0);
+  setText('st-customers-new', `+${cs.newToday||0} today`);
+  setText('st-orders', os.total || 0);
+  setText('st-orders-pending', `${os.pending||0} pending payment`);
+  setText('st-revenue', `₹${(os.todayRevenue||0).toLocaleString('en-IN')}`);
+  setText('st-revenue-total', `₹${(os.totalRevenue||0).toLocaleString('en-IN')} total`);
+  setText('st-referrals', cs.totalReferrals || 0);
+  setText('st-referrers', `${(cs.topReferrers||[]).length} active referrers`);
+
+  // Recent orders
+  const tbody = document.getElementById('recent-orders-body');
+  const recentOrders = (orderData.orders || []).slice(0, 5);
+  tbody.innerHTML = recentOrders.length
+    ? recentOrders.map(orderRow).join('')
+    : '<tr><td colspan="6" style="text-align:center;color:#404060;padding:32px">No orders yet — test the bot!</td></tr>';
+
+  // Top customers
+  const ctbody = document.getElementById('top-customers-body');
+  const topC = (custData.customers || []).slice(0,5);
+  ctbody.innerHTML = topC.length
+    ? topC.map(c => `
+      <tr>
+        <td>${c.name}</td>
+        <td>${c.totalOrders}</td>
+        <td>₹${(c.totalSpend||0).toLocaleString('en-IN')}</td>
+        <td>${c.referralCount || 0}</td>
+        <td>${(c.tags||[]).map(t=>`<span class="badge badge-${t==='vip'?'vip':'new'}">${t}</span>`).join(' ')||'—'}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="5" style="text-align:center;color:#404060;padding:32px">No customers yet</td></tr>';
+}
+
+// ── Orders ────────────────────────────────────────────────────────────────────
+async function loadOrders() {
+  const status = document.getElementById('orderFilter')?.value || '';
+  const url    = `${API}/api/orders${status ? '?status='+status : ''}`;
+  const data   = await fetch(url).then(r=>r.json()).catch(()=>({orders:[]}));
+  const tbody  = document.getElementById('orders-body');
+  const orders = data.orders || [];
+  tbody.innerHTML = orders.length
+    ? orders.map(orderRow).join('')
+    : '<tr><td colspan="7" style="text-align:center;color:#404060;padding:32px">No orders found</td></tr>';
+}
+
+function orderRow(o) {
+  const items    = (o.cart||[]).map(i=>i.name).join(', ').slice(0,40);
+  const statusBadge = `<span class="badge badge-${o.status?.replace('_','-')}">${statusLabel(o.status)}</span>`;
+  const date     = o.createdAt ? new Date(o.createdAt).toLocaleDateString('en-IN') : '—';
+  return `<tr>
+    <td style="font-weight:600">#CF${o.id}</td>
+    <td>${o.name||'—'}</td>
+    <td style="color:#8080c0">${items||'—'}</td>
+    <td>₹${(o.bill?.total||0).toLocaleString('en-IN')}</td>
+    <td style="color:#6060a0">${date}</td>
+    <td>${statusBadge}</td>
+    <td><button class="btn btn-ghost btn-sm" onclick="openUpdateStatus(${o.id})">Update</button></td>
+  </tr>`;
+}
+
+function statusLabel(s) {
+  const map = {pending_payment:'⏳ Pending',confirmed:'✅ Confirmed',packed:'📦 Packed',
+    shipped:'🚚 Shipped',out_for_delivery:'🛵 On the Way',delivered:'✅ Delivered',cancelled:'❌ Cancelled'};
+  return map[s] || s;
+}
+
+// ── Customers ─────────────────────────────────────────────────────────────────
+async function loadCustomers(tag) {
+  const url  = `${API}/api/customers${tag ? '?tag='+tag : ''}`;
+  const data = await fetch(url).then(r=>r.json()).catch(()=>({stats:{},customers:[]}));
+  const cs   = data.stats || {};
+
+  setText('c-total',   cs.total   || 0);
+  setText('c-week',    cs.newThisWeek || 0);
+  setText('c-revenue', `₹${(cs.totalRevenue||0).toLocaleString('en-IN')}`);
+
+  const tbody = document.getElementById('customers-body');
+  const list  = data.customers || [];
+  tbody.innerHTML = list.length
+    ? list.map(c => `<tr>
+        <td style="font-weight:600">${c.name}</td>
+        <td style="color:#6060a0">${c.firstSeenAt ? new Date(c.firstSeenAt).toLocaleDateString('en-IN') : '—'}</td>
+        <td>${c.totalOrders||0}</td>
+        <td>₹${(c.totalSpend||0).toLocaleString('en-IN')}</td>
+        <td><code style="background:#1e1e3a;padding:2px 8px;border-radius:4px;font-size:12px">${c.referralCode||'—'}</code></td>
+        <td>${c.referralCount||0} (₹${c.referralEarnings||0})</td>
+        <td>${(c.tags||[]).map(t=>`<span class="badge badge-${t==='vip'?'vip':'new'}">${t}</span>`).join(' ')||'<span style="color:#404060">—</span>'}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="7" style="text-align:center;color:#404060;padding:32px">No customers yet</td></tr>';
+}
+
+// ── Catalog ───────────────────────────────────────────────────────────────────
+async function loadCatalog() {
+  const data   = await fetch(`${API}/api/catalog`).then(r=>r.json()).catch(()=>({products:[]}));
+  const tbody  = document.getElementById('catalog-body');
+  const products = data.products || [];
+  tbody.innerHTML = products.length
+    ? products.map(p => `<tr>
+        <td style="font-weight:600">${p.name}</td>
+        <td>${p.price > 0 ? '₹'+p.price : '📩 Contact'}</td>
+        <td><span class="badge badge-new">${p.category}</span></td>
+        <td style="color:#8080c0">${(p.sizes||[]).join(', ')||'—'}</td>
+        <td style="color:#8080c0">${(p.colors||[]).join(', ')||'—'}</td>
+        <td>${p.inStock!==false?'<span style="color:#4ade80">✓ In Stock</span>':'<span style="color:#f87171">Out</span>'}</td>
+        <td><button class="btn btn-ghost btn-sm" onclick="toggleStock('${p.id}',${!p.inStock})">${p.inStock!==false?'Mark Out':'Mark In'}</button></td>
+      </tr>`).join('')
+    : '<tr><td colspan="7" style="text-align:center;color:#404060;padding:32px">No products. Add your first product!</td></tr>';
+}
+
+async function toggleStock(id, inStock) {
+  await fetch(`${API}/api/catalog/stock`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ id, inStock })
+  });
+  loadCatalog();
+}
+
+// ── Promotion ─────────────────────────────────────────────────────────────────
+async function loadPromotion() {
+  const [custData, catalogData] = await Promise.all([
+    fetch(`${API}/api/customers/stats`).then(r=>r.json()).catch(()=>({total:0})),
+    fetch(`${API}/api/catalog`).then(r=>r.json()).catch(()=>({products:[]})),
+  ]);
+
+  setText('promo-customers', `${custData.total||0} customers`);
+  setText('promo-products',  `${(catalogData.products||[]).length} products`);
+  setText('promo-referrals', `${custData.totalReferrals||0} referrals made`);
+
+  // Top referrers
+  const tbody = document.getElementById('referrers-body');
+  const refs  = custData.topReferrers || [];
+  tbody.innerHTML = refs.length
+    ? refs.map(r=>`<tr>
+        <td>${r.name}</td>
+        <td><code style="background:#1e1e3a;padding:2px 8px;border-radius:4px">${r.code||'—'}</code></td>
+        <td>${r.referrals}</td>
+        <td style="color:#4ade80">₹${r.earnings}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="4" style="text-align:center;color:#404060;padding:24px">No referrals yet</td></tr>';
+}
+
+// ── Modals ────────────────────────────────────────────────────────────────────
+function openModal(id)  { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+function openAddProduct() { openModal('modalProduct'); }
+
+// Auto-fetch Instagram post details when URL is pasted
+let _instaFetchTimer = null;
+function onInstaUrlChange(input) {
+  const url = input.value.trim();
+  const preview = document.getElementById('insta-preview');
+  if (!url || !url.includes('instagram.com')) { preview.style.display='none'; return; }
+  preview.style.display = 'block';
+  preview.innerHTML = '⏳ Fetching post details...';
+  clearTimeout(_instaFetchTimer);
+  _instaFetchTimer = setTimeout(async () => {
+    try {
+      const r = await fetch(`${API}/api/insta/fetch`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ url })
+      });
+      const d = await r.json();
+      if (d.ok) {
+        if (d.name     && !document.getElementById('p-name').value)     document.getElementById('p-name').value     = d.name;
+        if (d.category && !document.getElementById('p-cat').value)      document.getElementById('p-cat').value      = d.category;
+        if (d.colors   && !document.getElementById('p-colors').value)   document.getElementById('p-colors').value   = d.colors.join(', ');
+        if (d.imageUrl && !document.getElementById('p-image').value)    document.getElementById('p-image').value    = d.imageUrl;
+        preview.innerHTML = `✅ Post fetched!${d.imageUrl ? ' 🖼️ Image ready.' : ''} ${d.name ? 'Name: <b>'+d.name+'</b>' : ''}`;
+        preview.style.color = '#4ade80';
+      } else {
+        preview.innerHTML = '⚠️ Could not fetch post — fill fields manually';
+        preview.style.color = '#fbbf24';
+      }
+    } catch {
+      preview.innerHTML = '⚠️ Fetch failed — fill fields manually';
+      preview.style.color = '#fbbf24';
+    }
+  }, 800);
+}
+
+async function addProduct() {
+  const body = {
+    name        : document.getElementById('p-name').value,
+    price       : parseFloat(document.getElementById('p-price').value) || 0,
+    category    : document.getElementById('p-cat').value,
+    material    : document.getElementById('p-material').value,
+    sizes       : document.getElementById('p-sizes').value.split(',').map(s=>s.trim()).filter(Boolean),
+    colors      : document.getElementById('p-colors').value.split(',').map(c=>c.trim()).filter(Boolean),
+    imageUrl    : document.getElementById('p-image').value,
+    instaPostUrl: document.getElementById('p-instaurl').value.trim(),
+  };
+  if (!body.name || !body.category) return alert('Name and category are required');
+  await fetch(`${API}/api/catalog/add`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  // Clear form
+  ['p-instaurl','p-name','p-price','p-cat','p-material','p-sizes','p-colors','p-image']
+    .forEach(id => { const el=document.getElementById(id); if(el) el.value=''; });
+  document.getElementById('insta-preview').style.display='none';
+  closeModal('modalProduct');
+  loadCatalog();
+}
+
+async function openFlashSale() {
+  const data = await fetch(`${API}/api/customers/stats`).then(r=>r.json()).catch(()=>({total:0}));
+  document.getElementById('flashRecipients').textContent = `Will reach ${data.total||0} customers`;
+  openModal('modalFlash');
+}
+
+async function sendFlashSale() {
+  const msg = document.getElementById('flashMsg').value.trim();
+  if (!msg) return alert('Enter a message');
+  await fetch(`${API}/api/promote/flash`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
+  closeModal('modalFlash');
+  showAlert('promo','🔥 Flash sale sent to all customers!');
+}
+
+async function openNewArrival() {
+  const data = await fetch(`${API}/api/catalog`).then(r=>r.json()).catch(()=>({products:[]}));
+  const sel  = document.getElementById('arrivalProduct');
+  sel.innerHTML = (data.products||[]).map(p=>`<option value="${p.id}">${p.name} — ₹${p.price}</option>`).join('');
+  openModal('modalArrival');
+}
+
+async function sendNewArrival() {
+  const productId = document.getElementById('arrivalProduct').value;
+  await fetch(`${API}/api/promote/newarrival`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({productId})});
+  closeModal('modalArrival');
+  showAlert('promo','✅ New arrival alert sent to relevant customers!');
+}
+
+function openUpdateStatus(orderId) {
+  document.getElementById('statusOrderId').value = orderId;
+  openModal('modalStatus');
+}
+
+async function updateStatus() {
+  const id      = document.getElementById('statusOrderId').value;
+  const status  = document.getElementById('statusSelect').value;
+  const tracking= document.getElementById('trackingNum').value;
+  await fetch(`${API}/api/orders/${id}/status`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status,trackingNumber:tracking})});
+  closeModal('modalStatus');
+  loadOrders();
+}
+
+function saveSettings() { showAlert('promo','✅ Settings saved!'); }
+
+// ── Billing ───────────────────────────────────────────────────────────────────
+async function loadBilling() {
+  const [summaryData, commData] = await Promise.all([
+    fetch(`${API}/api/billing/summary`).then(r=>r.json()).catch(()=>({})),
+    fetch(`${API}/api/billing/commissions`).then(r=>r.json()).catch(()=>({commissions:[]})),
+  ]);
+
+  const sub     = summaryData.subscription || {};
+  const billing = summaryData.billing      || {};
+
+  // Subscription status badge
+  const badge   = document.getElementById('sub-status-badge');
+  const statusColors = {
+    trial   : ['#1a1a2a','#a78bfa','#3a3a6a','● Trial'],
+    active  : ['#1a2a1a','#4ade80','#2a4a2a','● Active'],
+    expired : ['#2a0d0d','#f87171','#5a1a1a','● Expired'],
+    suspended:['#2a1a00','#fbbf24','#5a3a00','● Suspended'],
+  };
+  const [bg, fg, border, label] = statusColors[sub.status] || statusColors.active;
+  badge.textContent   = label;
+  badge.style.background   = bg;
+  badge.style.color        = fg;
+  badge.style.borderColor  = border;
+
+  setText('bill-monthly',    '₹' + (sub.monthlyFee || 3000).toLocaleString('en-IN'));
+  setText('bill-days',       `${sub.daysRemaining || 0} days remaining${sub.status === 'trial' ? ' (Trial)' : ''}`);
+  setText('bill-commission', '₹' + (billing.totalCommission || 0).toLocaleString('en-IN'));
+  setText('bill-total',      '₹' + (billing.totalDue        || sub.monthlyFee || 3000).toLocaleString('en-IN'));
+  setText('bill-period',     billing.period || '');
+
+  // Commission table
+  const promoLabels = {
+    flash_sale    : '🔥 Flash Sale',
+    new_arrival   : '🆕 New Arrival',
+    abandoned_cart: '🛒 Abandoned Cart',
+    referral      : '🎟️ Referral',
+  };
+  const tbody = document.getElementById('commission-body');
+  const rows  = commData.commissions || [];
+  tbody.innerHTML = rows.length
+    ? rows.map(c => `<tr>
+        <td style="font-weight:600">#CF${c.orderId}</td>
+        <td>${promoLabels[c.promoSource] || c.promoSource}</td>
+        <td style="color:#8080c0">${c.breakdown?.[0]?.date || '—'}</td>
+        <td>₹${(c.breakdown||[]).reduce((s,b)=>s+b.itemPrice,0).toLocaleString('en-IN')}</td>
+        <td style="color:#4ade80;font-weight:700">₹${c.commissionAmount.toLocaleString('en-IN')}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="5" style="text-align:center;color:#404060;padding:32px">No commissions this month — promote more! 🚀</td></tr>';
+}
+
+function openRenewModal() { openModal('modalRenew'); }
+
+async function submitRenewal() {
+  const ref = document.getElementById('paymentRef').value.trim();
+  if (!ref) return alert('Enter the payment transaction ID');
+  await fetch(`${API}/api/billing/payment`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ amount: 3000, paymentId: ref, method: 'manual' })
+  });
+  closeModal('modalRenew');
+  showAlert('promo','✅ Payment recorded! Subscription renewed for 30 days.');
+  loadBilling();
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function setText(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+function showAlert(page, msg) {
+  const el = document.getElementById('alert-' + page);
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 4000);
+}
+
+// Close modals on overlay click
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) overlay.classList.remove('open');
+  });
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadOverview();
+</script>
+</body>
+</html>
