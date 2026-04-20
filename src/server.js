@@ -44,6 +44,19 @@ app.use(express.static(path.join(__dirname, "../public")));
 // ── Health check ───────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.json({ status: "CodeForge Instagram Bot running" }));
 
+// ── Meta Webhook Verification ──────────────────────────────────────────────────
+app.get("/webhook/manychat", (req, res) => {
+  const VERIFY_TOKEN = "selly123";
+  const mode      = req.query["hub.mode"];
+  const token     = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("[Webhook] Verified successfully");
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
 // ── Seller Catalog Builder Webhook ───────────────────────────────────────────
 // Separate endpoint for business owner to build catalog via DM conversation
 // Business DMs product photo → bot asks name, price, sizes, colors
