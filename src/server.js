@@ -44,17 +44,78 @@ app.use(express.static(path.join(__dirname, "../public")));
 // ── Health check ───────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.json({ status: "CodeForge Instagram Bot running" }));
 
-// ── Meta Webhook Verification ──────────────────────────────────────────────────
-app.get("/webhook/manychat", (req, res) => {
-  const VERIFY_TOKEN = "selly123";
+// ── Meta / Instagram Webhook ───────────────────────────────────────────────────
+const VERIFY_TOKEN = "selly123";
+
+// Verification (GET) — Meta calls this to verify the webhook
+app.get("/webhook/instagram", (req, res) => {
   const mode      = req.query["hub.mode"];
   const token     = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("[Webhook] Verified successfully");
+    console.log("[Instagram Webhook] Verified successfully");
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
+});
+
+// Also keep /webhook/manychat verification working
+app.get("/webhook/manychat", (req, res) => {
+  const mode      = req.query["hub.mode"];
+  const token     = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+// Receive messages (POST) — Meta sends DMs here
+app.post("/webhook/instagram", async (req, res) => {
+  res.sendStatus(200); // Always respond immediately
+
+  try {
+    const body = req.body;
+    if (body.object !== "instagram") return;
+
+    for (const entry of body.entry || []) {
+      for (const event of entry.messaging || []) {
+        const senderId = event.sender?.id;
+        const text     = event.message?.text || "";
+        const attachments = event.message?.attachments || [];
+
+        if (!senderId || senderId === process.env.INSTAGRAM_PAGE_ID) continue;
+
+        console.log(`[Instagram] DM from ${senderId}: ${text}`);
+
+        // Process through main webhook handler
+        const { subscriber_id, first_name, last_name } = {
+          subscriber_id: senderId,
+          first_name   : "Customer",
+          last_name    : "",
+        };
+
+        const session    = require("./session");
+        const routeMsg   = require("./ai");
+        const customerId = String(senderId);
+        const name       = first_name;
+
+        let sess = session.get(customerId) || session.create(customerId, { name, first_name, last_name });
+
+        if (attachments.length) {
+          const imageUrl = attachments[0]?.payload?.url;
+          if (imageUrl) {
+            await handleImageUpload(customerId, sess, imageUrl, name);
+            continue;
+          }
+        }
+
+        if (text) await routeMessage(customerId, sess, text, name);
+      }
+    }
+  } catch (err) {
+    console.error("[Instagram Webhook Error]", err.message);
+  }
 });
 
 // ── Seller Catalog Builder Webhook ───────────────────────────────────────────
