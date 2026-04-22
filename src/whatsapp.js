@@ -6,6 +6,12 @@ const PHONE_ID   = process.env.WHATSAPP_PHONE_ID || "";
 
 // ── Send a text message ───────────────────────────────────────────────────────
 async function send(to, text) {
+  // Test mode — capture replies instead of actually sending
+  if (module.exports._testMode && module.exports._testReplies) {
+    module.exports._testReplies.push(text);
+    return;
+  }
+
   if (!WA_TOKEN || !PHONE_ID) {
     console.log(`[WhatsApp MOCK] → ${to}: ${text.slice(0, 80)}`);
     return;
@@ -65,7 +71,7 @@ function apiPost(path, bodyStr) {
         try {
           const parsed = JSON.parse(data);
           if (parsed.error) console.error("[WhatsApp API Error]", parsed.error.message);
-          else console.log("[WhatsApp] Message sent successfully");
+          else console.log("[WhatsApp] Message sent ✓");
           resolve(parsed);
         } catch { resolve({}); }
       });

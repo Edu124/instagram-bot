@@ -6,22 +6,23 @@ const DELIVERY_CHARGE = 49;
 const GST_RATE        = 5; // 5% GST for clothing
 
 // ── Generate bill object ──────────────────────────────────────────────────────
-function generate({ cart, address, mobile, name, businessGST, businessName, businessAddress }) {
+function generate({ cart, address, mobile, name, businessGST, businessName, businessAddress, extra = 0 }) {
   const items = cart.map(item => ({
     id      : item.id,
     name    : item.name,
     size    : item.selectedSize || null,
-    price   : item.price,
+    price   : item.bargained ? item.price : item.price, // bargained price already applied
     qty     : item.qty || 1,
     total   : item.price * (item.qty || 1),
+    bargained: item.bargained || false,
   }));
 
   const subtotal  = items.reduce((sum, i) => sum + i.total, 0);
   const delivery  = subtotal >= 999 ? 0 : DELIVERY_CHARGE; // Free delivery above ₹999
   const gstBase   = subtotal;
   const gst       = Math.round(gstBase * GST_RATE / 100);
-  const total     = subtotal + delivery + gst;
-  const invoiceNo = `CF${Date.now().toString().slice(-8)}`;
+  const total     = subtotal + delivery + gst + extra; // extra = COD charge (30)
+  const invoiceNo = `SL${Date.now().toString().slice(-8)}`;
 
   return {
     invoiceNo,
@@ -30,9 +31,10 @@ function generate({ cart, address, mobile, name, businessGST, businessName, busi
     customerName   : name,
     customerMobile : mobile,
     deliveryAddress: address,
-    businessName   : businessName   || "CodeForge Commerce",
+    businessName   : businessName   || "Selly Commerce",
     businessGST    : businessGST    || "GSTXXXXXXXX",
     businessAddress: businessAddress || "India",
+    extra,
     items,
     subtotal,
     delivery,

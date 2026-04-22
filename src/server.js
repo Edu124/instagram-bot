@@ -1,15 +1,16 @@
-// ── CodeForge Instagram Bot — Main Server ─────────────────────────────────────
-// Flow:
-//   Instagram DM → ManyChat webhook → HERE → AI → ManyChat API → Customer DM
+// ── Selly WhatsApp Bot — Main Server ──────────────────────────────────────────
+// WhatsApp Cloud API · Multi-language · Status Reply · COD+Razorpay
+// Smart Bargaining · Festival Campaigns · Loyalty Points
 // ─────────────────────────────────────────────────────────────────────────────
 require("dotenv").config();
 
 const express    = require("express");
 const bodyParser = require("body-parser");
 const path       = require("path");
+
+// ── Core modules ───────────────────────────────────────────────────────────────
 const session    = require("./session");
-const manychat   = require("./manychat");
-const whatsapp   = require("./whatsapp");
+const wa         = require("./whatsapp");   // Primary sender — WhatsApp only
 const catalog    = require("./catalog");
 const orders     = require("./orders");
 const customers  = require("./customers");
@@ -20,16 +21,29 @@ const instafetch      = require("./instafetch");
 const subscriptions   = require("./subscriptions");
 const commissionEngine = require("./commission");
 
-// Default business ID (single-tenant for now — multi-tenant comes with Selly app)
+// ── New feature modules ────────────────────────────────────────────────────────
+const language = require("./language");
+const loyalty  = require("./loyalty");
+const festivals = require("./festivals");
+const bargain  = require("./bargain");
+const status   = require("./status");
+
+// ── Unified send helper ───────────────────────────────────────────────────────
+// All bot replies MUST go through here — easy to swap channel in future
+async function send(to, text)                 { return wa.send(to, text); }
+async function sendCards(to, products)        { return wa.sendProductCards(to, products); }
+async function sendReplies(to, text, replies) { return wa.sendQuickReplies(to, text, replies); }
+
 const DEFAULT_BUSINESS_ID = process.env.BUSINESS_ID || "default";
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// Allow Selly mobile/web app (any localhost port) to call the API
+// ── CORS ───────────────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   const origin = req.headers.origin || "";
-  if (!origin || origin.startsWith("http://localhost") || origin.startsWith("http://127.0.0.1")) {
+  if (!origin || origin.startsWith("http://localhost") || origin.startsWith("http://127.0.0.1") ||
+      origin.includes("railway.app") || origin.includes("vercel.app")) {
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
@@ -43,10 +57,16 @@ app.use(bodyParser.text({ type: "text/plain", limit: "10mb" }));
 app.use(express.static(path.join(__dirname, "../public")));
 
 // ── Health check ───────────────────────────────────────────────────────────────
-app.get("/", (req, res) => res.json({ status: "CodeForge Instagram Bot running" }));
+app.get("/", (req, res) => res.json({
+  status  : "Selly WhatsApp Bot running",
+  features: ["multi-language", "status-reply", "loyalty-points", "bargaining", "festival-campaigns", "COD+Razorpay"],
+}));
 
-// ── Meta / Instagram / WhatsApp Webhook ───────────────────────────────────────
-const VERIFY_TOKEN = "selly123";
+// ─────────────────────────────────────────────────────────────────────────────
+// WEBHOOKS
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || "selly123";
 
 // ── WhatsApp Webhook Verification (GET) ───────────────────────────────────────
 app.get("/webhook/whatsapp", (req, res) => {
@@ -54,15 +74,15 @@ app.get("/webhook/whatsapp", (req, res) => {
   const token     = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("[WhatsApp Webhook] Verified successfully");
+    console.log("[WhatsApp Webhook] Verified ✓");
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
 });
 
-// ── WhatsApp Webhook Receive Messages (POST) ───────────────────────────────────
+// ── WhatsApp Messages (POST) ───────────────────────────────────────────────────
 app.post("/webhook/whatsapp", async (req, res) => {
-  res.sendStatus(200); // Always respond immediately
+  res.sendStatus(200); // always respond to Meta immediately
 
   try {
     const body = req.body;
@@ -74,33 +94,76 @@ app.post("/webhook/whatsapp", async (req, res) => {
         const messages = value?.messages || [];
 
         for (const msg of messages) {
-          const senderId = msg.from;          // WhatsApp phone number
-          const text     = msg.text?.body || "";
-          const msgType  = msg.type;
-
+          const senderId = msg.from;
           if (!senderId) continue;
 
-          console.log(`[WhatsApp] Message from ${senderId}: ${text}`);
-
-          const customerId = senderId;
           const name       = value.contacts?.[0]?.profile?.name || "Customer";
           const first_name = name.split(" ")[0];
           const last_name  = name.split(" ").slice(1).join(" ");
+          const msgType    = msg.type;
 
-          // Use WhatsApp sender for replies
-          process.env.WHATSAPP_REPLY_TO = senderId;
+          // Load or create session (preserves language + loyalty across messages)
+          let sess = session.get(senderId) || session.create(senderId, { name, first_name, last_name });
 
-          let sess = session.get(customerId) || session.create(customerId, { name, first_name, last_name });
+          // ── Voice message → transcription ─────────────────────────────────
+          if (msgType === "audio") {
+            console.log(`[WhatsApp] Voice note from ${senderId}`);
+            await send(senderId,
+              "🎙️ Voice messages noted! For now please type your request.\n" +
+              "(Voice ordering coming soon!)"
+            );
+            continue;
+          }
 
+          // ── Image message ─────────────────────────────────────────────────
           if (msgType === "image") {
             const imageUrl = msg.image?.url || "";
             if (imageUrl) {
-              await handleImageUpload(customerId, sess, imageUrl, name);
+              await handleImageUpload(senderId, sess, imageUrl, name);
               continue;
             }
           }
 
-          if (text) await routeMessage(customerId, sess, text, name);
+          // ── Location sharing ──────────────────────────────────────────────
+          if (msgType === "location") {
+            const loc = msg.location;
+            if (loc && sess.state === "collecting_address") {
+              const locationStr = `📍 GPS: ${loc.latitude}, ${loc.longitude}` +
+                (loc.address ? `\n${loc.address}` : "") +
+                (loc.name    ? `\n${loc.name}`    : "");
+              await handleAddressCollection(senderId, sess, locationStr);
+              continue;
+            }
+          }
+
+          // ── Text message ──────────────────────────────────────────────────
+          const text = msg.text?.body || "";
+          if (!text) continue;
+
+          console.log(`[WhatsApp] Message from ${senderId} (${name}): ${text.slice(0, 80)}`);
+
+          // ── Detect & persist customer language ────────────────────────────
+          const requestedLang = language.getRequestedLanguage(text);
+          if (requestedLang) {
+            session.update(senderId, { lang: requestedLang });
+            sess = session.get(senderId);
+            await send(senderId,
+              `✅ Language changed to ${language.LANGUAGES[requestedLang]?.name || requestedLang}! 🌐`
+            );
+          } else if (!sess.lang) {
+            const detected = language.detectLanguage(text);
+            session.update(senderId, { lang: detected });
+            sess = session.get(senderId);
+          }
+
+          // ── Status reply detection ────────────────────────────────────────
+          if (status.isStatusReply(msg)) {
+            console.log(`[WhatsApp] Status reply from ${senderId}`);
+            await handleStatusReply(senderId, sess, text);
+            continue;
+          }
+
+          await routeMessage(senderId, sess, text, name);
         }
       }
     }
@@ -109,469 +172,74 @@ app.post("/webhook/whatsapp", async (req, res) => {
   }
 });
 
-// Verification (GET) — Meta calls this to verify the webhook
+// ── Instagram Webhook (kept for future use) ───────────────────────────────────
 app.get("/webhook/instagram", (req, res) => {
-  const mode      = req.query["hub.mode"];
-  const token     = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("[Instagram Webhook] Verified successfully");
-    return res.status(200).send(challenge);
-  }
+  const { "hub.mode": mode, "hub.verify_token": token, "hub.challenge": challenge } = req.query;
+  if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
   return res.sendStatus(403);
 });
+app.post("/webhook/instagram", (req, res) => res.sendStatus(200)); // no-op for now
 
-// Also keep /webhook/manychat verification working
-app.get("/webhook/manychat", (req, res) => {
-  const mode      = req.query["hub.mode"];
-  const token     = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
+// ── ManyChat webhook (legacy — no-op) ─────────────────────────────────────────
+app.get("/webhook/manychat",  (req, res) => res.sendStatus(200));
+app.post("/webhook/manychat", (req, res) => res.sendStatus(200));
+
+// ── Razorpay payment callback ─────────────────────────────────────────────────
+app.get("/webhook/payment", async (req, res) => {
+  const { razorpay_payment_link_id, razorpay_payment_link_status } = req.query;
+  if (razorpay_payment_link_status === "paid" && razorpay_payment_link_id) {
+    await handlePaymentSuccess(razorpay_payment_link_id);
   }
-  return res.sendStatus(403);
+  res.redirect(process.env.SUCCESS_URL || "/");
 });
 
-// Receive messages (POST) — Meta sends DMs here
-app.post("/webhook/instagram", async (req, res) => {
-  res.sendStatus(200); // Always respond immediately
-
-  try {
-    const body = req.body;
-    if (body.object !== "instagram") return;
-
-    for (const entry of body.entry || []) {
-      for (const event of entry.messaging || []) {
-        const senderId = event.sender?.id;
-        const text     = event.message?.text || "";
-        const attachments = event.message?.attachments || [];
-
-        if (!senderId || senderId === process.env.INSTAGRAM_PAGE_ID) continue;
-
-        console.log(`[Instagram] DM from ${senderId}: ${text}`);
-
-        // Process through main webhook handler
-        const { subscriber_id, first_name, last_name } = {
-          subscriber_id: senderId,
-          first_name   : "Customer",
-          last_name    : "",
-        };
-
-        const session    = require("./session");
-        const routeMsg   = require("./ai");
-        const customerId = String(senderId);
-        const name       = first_name;
-
-        let sess = session.get(customerId) || session.create(customerId, { name, first_name, last_name });
-
-        if (attachments.length) {
-          const imageUrl = attachments[0]?.payload?.url;
-          if (imageUrl) {
-            await handleImageUpload(customerId, sess, imageUrl, name);
-            continue;
-          }
-        }
-
-        if (text) await routeMessage(customerId, sess, text, name);
-      }
-    }
-  } catch (err) {
-    console.error("[Instagram Webhook Error]", err.message);
-  }
-});
-
-// ── Seller Catalog Builder Webhook ───────────────────────────────────────────
-// Separate endpoint for business owner to build catalog via DM conversation
-// Business DMs product photo → bot asks name, price, sizes, colors
-
-// ── Seller Sessions ───────────────────────────────────────────────────────────
-const sellerSessions = new Map(); // businessId → { step, pendingProduct }
-
-app.post("/webhook/seller", async (req, res) => {
+app.post("/webhook/payment", async (req, res) => {
+  // Razorpay webhook (POST) for auto order confirmation
   res.sendStatus(200);
-  const { subscriber_id, text, attachments } = req.body;
-  if (!subscriber_id) return;
-
-  const businessId = String(subscriber_id);
-  const message    = (text || "").trim();
-  const msgLower   = message.toLowerCase();
-  let   sess       = sellerSessions.get(businessId) || { step: "idle" };
-
-  // ── 1. Business sends an Instagram post URL ─────────────────────────────────
-  if (instafetch.isInstaUrl(message)) {
-    await manychat.send(businessId, "⏳ Fetching your post details...");
-
-    try {
-      const postData = await instafetch.fetchPostData(message);
-
-      // Auto-fill everything we can from the post
-      const pendingProduct = {
-        instaPostUrl : message,
-        imageUrl     : postData.imageUrl    || "",
-        description  : postData.caption     || "",
-        // Smart guesses from caption
-        name         : instafetch.guessName(postData.caption),
-        category     : instafetch.guessCategory(postData.caption),
-        colors       : instafetch.guessColors(postData.caption),
-        tags         : extractHashtags(postData.caption),
-      };
-
-      sess = { step: "ask_price", pendingProduct };
-      sellerSessions.set(businessId, sess);
-
-      const namePreview = pendingProduct.name
-        ? `\n_Detected name: "${pendingProduct.name}"_\n`
-        : "";
-      const catPreview  = pendingProduct.category !== "general"
-        ? `_Category: ${pendingProduct.category}_\n`
-        : "";
-
-      return manychat.send(businessId,
-        `✅ *Got your Instagram post!*\n` +
-        (postData.imageUrl ? `🖼️ Image fetched successfully\n` : `⚠️ Image not fetched (will use post link)\n`) +
-        namePreview + catPreview +
-        `\n💰 *What's the price?*\n_(e.g. 799  or type "contact" if price varies)_`
-      );
-
-    } catch (err) {
-      console.error("[seller/instaUrl] Fetch error:", err.message);
-      // Even if fetch fails, store the URL and continue
-      sess = {
-        step          : "ask_price",
-        pendingProduct: { instaPostUrl: message, imageUrl: "", description: "", name: "", category: "general", colors: [], tags: [] }
-      };
-      sellerSessions.set(businessId, sess);
-      return manychat.send(businessId,
-        `✅ *Got your post link!*\n_(Couldn't auto-fetch image — you can add it later from the dashboard)_\n\n` +
-        `💰 *What's the price?*\n_(e.g. 799  or type "contact" if price varies)_`
-      );
-    }
-  }
-
-  // ── 2. Business uploads a product photo directly ────────────────────────────
-  if (attachments?.length && attachments[0]?.url) {
-    const imageUrl = attachments[0].url;
-    sess = { step: "ask_price", pendingProduct: { imageUrl, instaPostUrl: "", description: "", name: "", category: "general", colors: [], tags: [] } };
-    sellerSessions.set(businessId, sess);
-    return manychat.send(businessId,
-      `✅ *Got your product photo!*\n\n` +
-      `💰 *What's the price?*\n_(e.g. 799  or type "contact" if price varies)_`
-    );
-  }
-
-  // ── 3. Handle "done" / "list" commands ─────────────────────────────────────
-  if (msgLower === "done" || msgLower === "list" || msgLower === "catalog") {
-    const products = catalog.getAll();
-    sellerSessions.set(businessId, { step: "idle" });
-    return manychat.send(businessId,
-      `📦 *Your Catalog (${products.length} products):*\n\n` +
-      products.slice(0, 10).map((p, i) =>
-        `${i + 1}. ${p.name || "Unnamed"} — ${p.price > 0 ? "₹" + p.price : "Contact"}`
-      ).join("\n") +
-      (products.length > 10 ? `\n_...and ${products.length - 10} more_` : "") +
-      `\n\nSend an Instagram post link or photo to add more! 📸`
-    );
-  }
-
-  // ── 4. Step machine ─────────────────────────────────────────────────────────
-  switch (sess.step) {
-
-    // ── Price ──────────────────────────────────────────────────────────────
-    case "ask_price": {
-      const isContact = msgLower === "contact" || msgLower === "0";
-      const priceVal  = isContact ? 0 : parseFloat(message.replace(/[^0-9.]/g, ""));
-
-      if (!isContact && (isNaN(priceVal) || priceVal < 0)) {
-        return manychat.send(businessId, `Please enter a valid price (e.g. "799") or type "contact"`);
-      }
-
-      sess.pendingProduct.price           = isContact ? 0 : priceVal;
-      sess.pendingProduct.contactForPrice = isContact;
-
-      // If we already have a name from the post, skip asking for it
-      if (sess.pendingProduct.name) {
-        sess.step = "ask_sizes";
-        sellerSessions.set(businessId, sess);
-        return manychat.send(businessId,
-          `💰 Price set: ${isContact ? "Contact for price" : "₹" + priceVal}\n\n` +
-          `📏 *Sizes available?*\n_(e.g. S,M,L,XL  or  28,30,32 — type "no" if one size)_`
-        );
-      } else {
-        // No name detected from caption — ask for it
-        sess.step = "ask_name";
-        sellerSessions.set(businessId, sess);
-        return manychat.send(businessId,
-          `💰 Price set: ${isContact ? "Contact for price" : "₹" + priceVal}\n\n` +
-          `📝 *Product name?*\n_(e.g. Rose Scented Candle)_`
-        );
-      }
-    }
-
-    // ── Name (only asked if not auto-detected) ─────────────────────────────
-    case "ask_name": {
-      sess.pendingProduct.name = message;
-      sess.step = "ask_sizes";
-      sellerSessions.set(businessId, sess);
-      return manychat.send(businessId,
-        `📏 *Sizes available?*\n_(e.g. S,M,L,XL  or  28,30,32 — type "no" if one size)_`
-      );
-    }
-
-    // ── Sizes ──────────────────────────────────────────────────────────────
-    case "ask_sizes": {
-      sess.pendingProduct.sizes    = msgLower === "no" ? [] :
-        message.split(/[,;]/).map(s => s.trim().toUpperCase()).filter(Boolean);
-      sess.pendingProduct.hasSizes = sess.pendingProduct.sizes.length > 0;
-
-      // If we auto-detected colors, skip asking
-      if (sess.pendingProduct.colors?.length) {
-        return saveAndConfirmProduct(businessId, sess);
-      }
-
-      sess.step = "ask_colors";
-      sellerSessions.set(businessId, sess);
-      return manychat.send(businessId,
-        `🎨 *Colors available?*\n_(e.g. White, Pink, Blue — type "no" if only one color)_`
-      );
-    }
-
-    // ── Colors ─────────────────────────────────────────────────────────────
-    case "ask_colors": {
-      sess.pendingProduct.colors = msgLower === "no" ? [] :
-        message.split(/[,;]/).map(c => c.trim()).filter(Boolean);
-
-      return saveAndConfirmProduct(businessId, sess);
-    }
-
-    // ── Default / idle ─────────────────────────────────────────────────────
-    default:
-      sellerSessions.set(businessId, { step: "idle" });
-      return manychat.send(businessId,
-        `👋 *Hi! Add products to your catalog:*\n\n` +
-        `📸 Send an *Instagram post link* — bot auto-fills image + name\n` +
-        `🖼️ Or send a *product photo* directly\n\n` +
-        `Type "list" to see your current catalog.`
-      );
+  const { payload } = req.body;
+  if (payload?.payment_link?.entity?.status === "paid") {
+    const linkId = payload.payment_link.entity.id;
+    await handlePaymentSuccess(linkId);
   }
 });
 
-// ── Save product and send confirmation ────────────────────────────────────────
-async function saveAndConfirmProduct(businessId, sess) {
-  // Ensure category exists
-  if (!sess.pendingProduct.category || sess.pendingProduct.category === "general") {
-    // Try to detect from name
-    sess.pendingProduct.category =
-      instafetch.guessCategory(sess.pendingProduct.name + " " + sess.pendingProduct.description);
-  }
+// ─────────────────────────────────────────────────────────────────────────────
+// MESSAGE ROUTER
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const product      = catalog.addProduct(sess.pendingProduct);
-  const priceDisplay = product.price > 0 ? `₹${product.price}` : "Contact for price";
-  const imageStatus  = product.imageUrl ? "🖼️ Image: ✅ ready" : "🖼️ Image: add from dashboard";
-  const postLink     = product.instaPostUrl
-    ? `🔗 Post: ${product.instaPostUrl.slice(0, 40)}...`
-    : "";
-
-  sellerSessions.set(businessId, { step: "idle" });
-
-  await manychat.send(businessId,
-    `✅ *Product Added to Catalog!*\n` +
-    `━━━━━━━━━━━━━━━━━━\n` +
-    `📦 *${product.name || "Unnamed Product"}*\n` +
-    `💰 ${priceDisplay}\n` +
-    `📁 Category: ${product.category}\n` +
-    `📏 Sizes: ${product.sizes?.length ? product.sizes.join(", ") : "One size"}\n` +
-    `🎨 Colors: ${product.colors?.length ? product.colors.join(", ") : "—"}\n` +
-    `${imageStatus}\n` +
-    (postLink ? `${postLink}\n` : "") +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `🛍️ Customers can now find this by searching!\n\n` +
-    `Send another post link or photo to add more 📸`
-  );
-}
-
-// ── Extract hashtags from caption ─────────────────────────────────────────────
-function extractHashtags(caption = "") {
-  const matches = caption.match(/#(\w+)/g) || [];
-  return matches
-    .map(h => h.slice(1).toLowerCase())
-    .filter(h => h.length > 2 && h.length < 20)
-    .slice(0, 10);
-}
-
-// ── Business Dashboard APIs ────────────────────────────────────────────────────
-
-// GET  /api/orders          — list all orders with stats
-app.get("/api/orders", (req, res) => {
-  const { status, page } = req.query;
-  res.json({
-    stats : orders.getStats(),
-    ...orders.getAll({ status, page: Number(page) || 1 }),
-  });
-});
-
-// POST /api/orders/:id/status — update order status + tracking
-app.post("/api/orders/:id/status", (req, res) => {
-  const { status, trackingNumber, trackingUrl } = req.body;
-  const updated = orders.updateStatus(req.params.id, status, { trackingNumber, trackingUrl });
-  if (!updated) return res.status(404).json({ error: "Order not found" });
-
-  // Notify customer via DM
-  const emoji = { packed:"📦", shipped:"🚚", out_for_delivery:"🛵", delivered:"✅" };
-  const msgs  = {
-    packed          : "📦 Great news! Your order is packed and ready to ship.",
-    shipped         : `🚚 Your order is on the way!\n${trackingNumber ? `Tracking: ${trackingNumber}` : ""}`,
-    out_for_delivery: "🛵 Out for delivery today! Please be available.",
-    delivered       : "✅ Delivered! Hope you love it 😊\nHow was your experience? Reply ⭐⭐⭐⭐⭐",
-  };
-
-  if (msgs[status]) {
-    manychat.send(updated.customerId, msgs[status]).catch(() => {});
-  }
-
-  // Schedule review request 24 hours after delivery
-  if (status === "delivered") {
-    scheduleReviewRequest(updated.customerId, updated.id, updated.name);
-  }
-
-  res.json({ ok: true, order: updated });
-});
-
-// POST /api/catalog/upload  — upload CSV catalog
-app.post("/api/catalog/upload", (req, res) => {
-  try {
-    const csvText  = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
-    const imported = catalog.importCSV(csvText);
-    res.json({ ok: true, imported: imported.length, message: `${imported.length} products imported` });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// POST /api/catalog/add     — add single product
-app.post("/api/catalog/add", (req, res) => {
-  const product = catalog.addProduct(req.body);
-  res.json({ ok: true, product });
-});
-
-// GET  /api/catalog         — list all products
-app.get("/api/catalog", (req, res) => {
-  res.json({ products: catalog.getAll() });
-});
-
-// POST /api/catalog/stock   — toggle product in/out of stock
-app.post("/api/catalog/stock", (req, res) => {
-  const { id, inStock } = req.body;
-  if (!id) return res.status(400).json({ error: "id required" });
-  const product = catalog.toggleStock(id, inStock);
-  if (!product) return res.status(404).json({ error: "Product not found" });
-  res.json({ ok: true, product });
-});
-
-// DELETE /api/catalog/:id   — remove product from catalog
-app.delete("/api/catalog/:id", (req, res) => {
-  const deleted = catalog.deleteProduct(req.params.id);
-  if (!deleted) return res.status(404).json({ error: "Product not found" });
-  res.json({ ok: true });
-});
-
-// PUT /api/catalog/:id      — update product fields
-app.put("/api/catalog/:id", (req, res) => {
-  const product = catalog.update(req.params.id, req.body);
-  if (!product) return res.status(404).json({ error: "Product not found" });
-  res.json({ ok: true, product });
-});
-
-// GET  /api/stats           — dashboard stats
-app.get("/api/stats", (req, res) => {
-  res.json(orders.getStats());
-});
-
-// ── Instagram Post Fetch API — used by dashboard ──────────────────────────────
-// POST /api/insta/fetch  { url } → { ok, imageUrl, name, category, colors, caption }
-app.post("/api/insta/fetch", async (req, res) => {
-  const { url } = req.body;
-  if (!url || !instafetch.isInstaUrl(url)) {
-    return res.status(400).json({ ok: false, error: "Not a valid Instagram URL" });
-  }
-
-  try {
-    const data = await instafetch.fetchPostData(url);
-    res.json({
-      ok       : true,
-      imageUrl : data.imageUrl,
-      caption  : data.caption,
-      name     : instafetch.guessName(data.caption),
-      category : instafetch.guessCategory(data.caption),
-      colors   : instafetch.guessColors(data.caption),
-    });
-  } catch (err) {
-    res.json({ ok: false, error: err.message });
-  }
-});
-
-// ── ManyChat Webhook — receives every customer DM ─────────────────────────────
-// ManyChat sends POST to this endpoint whenever customer sends a DM
-app.post("/webhook/manychat", async (req, res) => {
-  res.sendStatus(200); // Always respond immediately to ManyChat
-
-  try {
-    const { subscriber_id, first_name, last_name, text, attachments } = req.body;
-    if (!subscriber_id) return;
-
-    const customerId = String(subscriber_id);
-    const name       = first_name || "there";
-    const message    = (text || "").trim();
-
-    // Load or create conversation session
-    let sess = session.get(customerId) || session.create(customerId, { name, first_name, last_name });
-
-    // ── Handle image attachment (Seller Toolkit) ──────────────────────────────
-    if (attachments?.length) {
-      const imageUrl = attachments[0]?.url;
-      if (imageUrl) {
-        await handleImageUpload(customerId, sess, imageUrl, name);
-        return;
-      }
-    }
-
-    if (!message) return;
-
-    // ── Route to correct handler based on session state ───────────────────────
-    await routeMessage(customerId, sess, message, name);
-
-  } catch (err) {
-    console.error("[webhook] Error:", err.message);
-  }
-});
-
-// ── Message Router ────────────────────────────────────────────────────────────
 async function routeMessage(customerId, sess, message, name) {
   const state = sess.state;
+  const lang  = sess.lang || "english";
 
-  // ── Global shortcuts (work in any state) ─────────────────────────────────
-  if (isTrackingRequest(message)) {
-    return handleTracking(customerId, sess, message);
-  }
-  if (isReturnRequest(message)) {
-    return handleReturn(customerId, sess, message);
-  }
-  if (message.toLowerCase() === "cancel" || message.toLowerCase() === "start over") {
+  // ── Global commands (any state) ───────────────────────────────────────────
+  if (isLoyaltyRequest(message)) return handleLoyaltyCheck(customerId, sess);
+  if (isTrackingRequest(message)) return handleTracking(customerId, sess, message);
+  if (isReturnRequest(message))   return handleReturn(customerId, sess, message);
+  if (isOrderHistoryRequest(message)) return handleOrderHistory(customerId, sess);
+  if (isReferralRequest(message)) return handleReferralCode(customerId);
+
+  if (message.toLowerCase() === "cancel" || message.toLowerCase() === "start over" ||
+      /^(रद्द|रद्द करो|cancel karo)$/i.test(message)) {
     session.reset(customerId);
-    return manychat.send(customerId, "Okay, starting fresh! 😊\n\nWhat are you looking for today?");
+    const msgs = {
+      hindi   : "ठीक है, नए सिरे से शुरू करते हैं! 😊\nआप क्या ढूंढ रहे हैं?",
+      hinglish: "Okay, fresh start! 😊\nKya dhundh rahe ho?",
+      english : "Okay, starting fresh! 😊\nWhat are you looking for today?",
+    };
+    return send(customerId, msgs[lang] || msgs.english);
   }
-  if (isOrderHistoryRequest(message)) {
-    return handleOrderHistory(customerId, sess);
-  }
-  if (isReferralRequest(message)) {
-    return handleReferralCode(customerId);
-  }
+
+  // ── COD confirmation ──────────────────────────────────────────────────────
+  if (state === "choosing_payment") return handlePaymentChoice(customerId, sess, message);
 
   // ── State machine ─────────────────────────────────────────────────────────
   switch (state) {
-
     case "idle":
     case "searching":
       return handleSearch(customerId, sess, message, name);
+
+    case "status_inquiry":
+      return handleStatusProductResponse(customerId, sess, message);
 
     case "selecting":
       return handleProductSelection(customerId, sess, message);
@@ -585,6 +253,9 @@ async function routeMessage(customerId, sess, message, name) {
     case "collecting_mobile":
       return handleMobileCollection(customerId, sess, message);
 
+    case "choosing_payment":
+      return handlePaymentChoice(customerId, sess, message);
+
     case "awaiting_payment":
       return handlePaymentCheck(customerId, sess, message);
 
@@ -594,366 +265,659 @@ async function routeMessage(customerId, sess, message, name) {
   }
 }
 
-// ── Handler: Product Search ───────────────────────────────────────────────────
-async function handleSearch(customerId, sess, message, name) {
-  // Check if customer is adding to existing cart or refining search
-  const isRefining = sess.cart?.length > 0 &&
-    (message.toLowerCase().includes("add") || message.toLowerCase().includes("also"));
+// ─────────────────────────────────────────────────────────────────────────────
+// FEATURE: WhatsApp Status Reply
+// ─────────────────────────────────────────────────────────────────────────────
+async function handleStatusReply(customerId, sess, text) {
+  const lang           = sess.lang || "english";
+  const recentStatus   = status.getMostRecentStatus();
 
-  // AI extracts search intent
+  // If customer replies with a number, handle product selection
+  if (sess.state === "status_inquiry") {
+    return handleStatusProductResponse(customerId, sess, text);
+  }
+
+  session.update(customerId, { state: "status_inquiry", statusProduct: recentStatus });
+  const reply = status.buildStatusReply(recentStatus, lang);
+  await send(customerId, reply);
+}
+
+async function handleStatusProductResponse(customerId, sess, message) {
+  const lang    = sess.lang || "english";
+  const msg     = message.trim();
+  const num     = parseInt(msg);
+  const product = sess.statusProduct;
+
+  if (num === 1 && product?.productId) {
+    // Show product details
+    const p = catalog.get(product.productId);
+    if (p) {
+      session.update(customerId, { state: "selecting", searchResults: [p] });
+      const priceStr = p.price > 0 ? `₹${p.price}` : "Contact for price";
+      const sizeStr  = p.sizes?.length ? `\n📏 Sizes: ${p.sizes.join(", ")}` : "";
+      const colorStr = p.colors?.length ? `\n🎨 Colors: ${p.colors.join(", ")}` : "";
+      await send(customerId,
+        `📦 *${p.name}*\n💰 ${priceStr}${sizeStr}${colorStr}\n\nReply *1* to order or *back* to browse more`
+      );
+      return;
+    }
+  }
+
+  if (num === 2 || msg.toLowerCase().includes("more") || msg.toLowerCase().includes("catalog")) {
+    session.update(customerId, { state: "idle" });
+    const msgs = {
+      hindi   : "ज़रूर! बताइए आप क्या ढूंढ रहे हैं? 😊",
+      hinglish: "Sure! Batao kya dhundh rahe ho? 😊",
+      english : "Sure! What are you looking for? 😊",
+    };
+    return send(customerId, msgs[lang] || msgs.english);
+  }
+
+  // Treat as a search
+  session.update(customerId, { state: "idle" });
+  return handleSearch(customerId, sess, message, sess.name);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FEATURE: Product Search (with Bargaining hook)
+// ─────────────────────────────────────────────────────────────────────────────
+async function handleSearch(customerId, sess, message, name) {
+  const lang = sess.lang || "english";
+
+  // Bargain check in search state (e.g. "I want jeans for 400")
+  if (bargain.isBargaining(message) && sess.cart?.length) {
+    const item = sess.cart[sess.cart.length - 1];
+    return handleBargain(customerId, sess, item, message);
+  }
+
   const intent = await ai.extractSearchIntent(message);
 
   if (!intent.product) {
-    return manychat.send(customerId,
-      `Hi ${name}! 👋 I'm your shopping assistant.\n\n` +
-      `Tell me what you're looking for!\n` +
-      `Example: "blue jeans under ₹800" or "cotton kurti size M"`
-    );
+    const greets = {
+      hindi   : `नमस्ते ${name}! 👋\n\nमैं Selly हूं — आपका WhatsApp shopping assistant! 🛍️\n\nआप क्या ढूंढ रहे हैं? बताइए!\nउदाहरण: "नीली जींस ₹800 में" या "कुर्ती size M"`,
+      hinglish: `Hey ${name}! 👋 Main Selly hoon — aapka WhatsApp shopping assistant! 🛍️\n\nKya dhundh rahe ho? Bolo!\nExample: "blue jeans under 800" ya "kurti size M"`,
+      english : `Hi ${name}! 👋 I'm Selly — your WhatsApp shopping assistant! 🛍️\n\nWhat are you looking for?\nExample: "blue jeans under ₹800" or "cotton kurti size M"`,
+    };
+    return send(customerId, greets[lang] || greets.english);
   }
 
-  // Search catalog
   const searchResult = catalog.search(intent);
-  const results      = searchResult.results || searchResult; // backward compat
+  const results      = searchResult.results || searchResult;
 
   if (!results.length) {
-    return manychat.send(customerId,
-      `😕 No products found for "${intent.rawQuery}".\n\n` +
-      `Try:\n• Different keywords\n• Remove price filter\n• Check spelling`
-    );
+    const noResult = {
+      hindi   : `😕 "${intent.rawQuery}" के लिए कोई प्रोडक्ट नहीं मिला।\nकुछ अलग try करें!`,
+      hinglish: `😕 "${intent.rawQuery}" ke liye kuch nahi mila.\nKuch aur try karo!`,
+      english : `😕 No products found for "${intent.rawQuery}".\nTry different keywords!`,
+    };
+    return send(customerId, noResult[lang] || noResult.english);
   }
 
-  // No exact price match — suggest closest
-  if (searchResult.noExactMatch) {
-    const closest = results;
-    const header  = `😕 No "${intent.rawQuery}" found under ₹${searchResult.searchedMax}.\n\n` +
-                    `💡 *Closest options:*\n\n`;
-    const list    = closest.map((p, i) =>
-      `${i + 1}️⃣ *${p.name}* — ₹${p.price}\n` +
-      `   ⭐ ${p.rating || "New"} | ${p.colors?.join(", ") || ""}`
-    ).join("\n\n");
+  session.update(customerId, { state: "selecting", lastSearch: intent, searchResults: results });
 
-    session.update(customerId, { state: "selecting", lastSearch: intent, searchResults: closest });
-    return manychat.send(customerId,
-      header + list + "\n\nReply number to select or search again 🔍"
-    );
-  }
+  const priceLabel = intent.maxPrice ? ` under ₹${intent.maxPrice}` : "";
+  const header     = {
+    hindi   : `🔍 *${results.length} प्रोडक्ट मिले "${intent.rawQuery}"${priceLabel} के लिए*\n\n`,
+    hinglish: `🔍 *${results.length} results "${intent.rawQuery}"${priceLabel}*\n\n`,
+    english : `🔍 *${results.length} result${results.length > 1 ? "s" : ""} for "${intent.rawQuery}"${priceLabel}*\n\n`,
+  };
 
-  // Update session
-  session.update(customerId, {
-    state        : "selecting",
-    lastSearch   : intent,
-    searchResults: results,
-  });
+  const displayItems = results.slice(0, 5);
+  const productList  = displayItems.map((p, i) => {
+    const priceStr = p.price > 0 ? `₹${p.price}` : "📩 Contact";
+    return `${i + 1}️⃣ *${p.name}* — ${priceStr}\n` +
+           (p.colors?.length ? `   🎨 ${p.colors.slice(0, 3).join(", ")}` : "");
+  }).join("\n\n");
 
-  // Build product grid response
-  const priceLabel    = intent.maxPrice ? ` under ₹${intent.maxPrice}` : "";
-  const displayItems  = results.slice(0, 5);
-  const hasInstaCards = displayItems.some(p => p.imageUrl || p.instaPostUrl);
+  const footer = {
+    hindi   : `\n\nनंबर reply करें select करने के लिए • "done" checkout के लिए 🛒`,
+    hinglish: `\n\nNumber reply karo select karne ke liye • "done" for checkout 🛒`,
+    english : `\n\nReply number to select • "done" to checkout 🛒`,
+  };
 
-  if (hasInstaCards) {
-    // ── Send Instagram-style image cards ─────────────────────────────────────
-    // Add post link as a view button where available
-    const cardProducts = displayItems.map(p => ({
-      ...p,
-      // Ensure subtitle shows post origin if available
-      _viewPostUrl: p.instaPostUrl || null,
-    }));
+  await send(customerId, (header[lang] || header.english) + productList + (footer[lang] || footer.english));
 
-    const header = `🔍 *${results.length} result${results.length > 1 ? "s" : ""} for "${intent.rawQuery}"${priceLabel}*`;
-    await manychat.send(customerId, header);
-    await manychat.sendProductCards(customerId, cardProducts);
-
-    const footer = results.length > 5
-      ? `_Showing 5 of ${results.length}. Say "more" to see more._\n\n`
-      : "";
-    await manychat.send(customerId,
-      footer + `Reply number to select • "more" for more • "done" to checkout 🛒`
-    );
-  } else {
-    // ── Plain text listing (no images) ───────────────────────────────────────
-    const header = `🔍 *${results.length} result${results.length > 1 ? "s" : ""} for "${intent.rawQuery}"${priceLabel}*\n\n`;
-
-    const productList = displayItems.map((p, i) => {
-      const priceStr = p.price > 0 ? `₹${p.price}` : "📩 Contact for price";
-      return `${i + 1}️⃣ *${p.name}* — ${priceStr}\n` +
-             `   ⭐ ${p.rating || "New"} | ${p.colors?.join(", ") || ""}`;
-    }).join("\n\n");
-
-    const footer  = results.length > 5 ? `\n\n_Showing 5 of ${results.length}. Say "more" to see more._` : "";
-    const actions = `\n\nReply number to select • "more" for more • "done" to checkout 🛒`;
-
-    await manychat.send(customerId, header + productList + footer + actions);
-  }
-
-  // Show cart status if items already selected
   if (sess.cart?.length) {
-    await manychat.send(customerId,
-      `🛒 *Cart (${sess.cart.length} item${sess.cart.length > 1 ? "s" : ""}):* ` +
-      sess.cart.map(i => i.name).join(", ")
-    );
+    const cartMsg = {
+      hindi   : `🛒 *Cart (${sess.cart.length} item):* ${sess.cart.map(i => i.name).join(", ")}`,
+      hinglish: `🛒 *Cart (${sess.cart.length} item):* ${sess.cart.map(i => i.name).join(", ")}`,
+      english : `🛒 *Cart (${sess.cart.length} item${sess.cart.length > 1 ? "s" : ""}):* ${sess.cart.map(i => i.name).join(", ")}`,
+    };
+    await send(customerId, cartMsg[lang] || cartMsg.english);
   }
 }
 
-// ── Handler: Product Selection ────────────────────────────────────────────────
-async function handleProductSelection(customerId, sess, message) {
-  const msg = message.toLowerCase().trim();
+// ─────────────────────────────────────────────────────────────────────────────
+// FEATURE: Smart Bargaining
+// ─────────────────────────────────────────────────────────────────────────────
+async function handleBargain(customerId, sess, item, message) {
+  const lang        = sess.lang || "english";
+  const offeredPrice = bargain.extractOfferedPrice(message);
+  const round        = sess.bargainRound || 1;
+  const result       = bargain.getBargainReply(item, offeredPrice, round, lang);
 
-  // Customer wants to checkout
+  if (!result.handled) {
+    // Not a bargain — continue to normal search
+    return handleSearch(customerId, sess, message, sess.name);
+  }
+
+  if (result.accepted) {
+    // Update cart item with bargained price
+    const cart = (sess.cart || []).map(i =>
+      i.id === item.id ? { ...i, price: result.finalPrice, originalPrice: i.price, bargained: true } : i
+    );
+    session.update(customerId, { cart, state: "selecting", bargainRound: 0 });
+    await send(customerId, result.message);
+    return;
+  }
+
+  // Counter offer
+  const newRound = round + 1;
+  if (newRound > bargain.MAX_ROUNDS) {
+    // Exhausted — send final floor price
+    const floorReply = bargain.getTooLowReply(item, lang);
+    session.update(customerId, { bargainRound: 0 });
+    return send(customerId, floorReply);
+  }
+
+  session.update(customerId, { bargainRound: newRound });
+  await send(customerId, result.message);
+}
+
+// ── Product Selection (bargaining hook inside) ─────────────────────────────────
+async function handleProductSelection(customerId, sess, message) {
+  const msg  = message.toLowerCase().trim();
+  const lang = sess.lang || "english";
+
   if (msg === "done" || msg === "checkout" || msg === "buy") {
     if (!sess.cart?.length) {
-      return manychat.send(customerId, "Your cart is empty! Search for products first 😊");
+      const empty = { hindi: "Cart खाली है! पहले products search करें 😊", hinglish: "Cart empty hai! Pehle search karo 😊", english: "Your cart is empty! Search for products first 😊" };
+      return send(customerId, empty[lang] || empty.english);
     }
     return startSizing(customerId, sess);
   }
 
-  // Customer wants more results
   if (msg === "more") {
     const next = (sess.searchResults || []).slice(5, 10);
-    if (!next.length) return manychat.send(customerId, "No more results. Try a different search!");
+    if (!next.length) {
+      const noMore = { hindi: "और results नहीं हैं।", hinglish: "Aur results nahi hain.", english: "No more results. Try a different search!" };
+      return send(customerId, noMore[lang] || noMore.english);
+    }
     session.update(customerId, { searchResults: sess.searchResults.slice(5) });
     return handleSearch(customerId, sess, sess.lastSearch?.rawQuery || "", sess.name);
   }
 
-  // Customer selected a number
   const num = parseInt(msg);
   if (!isNaN(num) && num >= 1 && num <= 5) {
     const product = (sess.searchResults || [])[num - 1];
-    if (!product) return manychat.send(customerId, "Invalid selection. Reply a number from the list.");
+    if (!product) {
+      const invalid = { hindi: "गलत selection। List से number reply करें।", hinglish: "Invalid selection. List se number reply karo.", english: "Invalid selection. Reply a number from the list." };
+      return send(customerId, invalid[lang] || invalid.english);
+    }
 
-    const cart = sess.cart || [];
+    // ── Bargaining check: if customer said "1 for 300" ─────────────────────
+    if (bargain.isBargaining(message)) {
+      const cart = [...(sess.cart || []), { ...product, selectedSize: null }];
+      session.update(customerId, { cart, state: "selecting" });
+      return handleBargain(customerId, sess, product, message);
+    }
+
+    const cart      = [...(sess.cart || [])];
     const alreadyIn = cart.find(i => i.id === product.id);
-
     if (alreadyIn) {
-      return manychat.send(customerId, `"${product.name}" is already in your cart! Reply "done" to checkout or search for more.`);
+      const dup = { hindi: `"${product.name}" already cart में है! "done" reply करें checkout के लिए।`, hinglish: `"${product.name}" already cart mein hai! "done" reply karo checkout ke liye.`, english: `"${product.name}" is already in your cart! Reply "done" to checkout.` };
+      return send(customerId, dup[lang] || dup.english);
     }
 
     cart.push({ ...product, selectedSize: null });
-    session.update(customerId, { cart, state: "selecting" });
+    session.update(customerId, { cart, state: "selecting", bargainRound: 0 });
 
-    await manychat.send(customerId,
-      `✅ *${product.name}* added to cart!\n\n` +
-      `🛒 Cart: ${cart.length} item${cart.length > 1 ? "s" : ""}\n\n` +
-      `Search more products or reply "done" to checkout 👇`
-    );
-    return;
+    const added = {
+      hindi   : `✅ *${product.name}* cart में add हुआ!\n\n🛒 Cart: ${cart.length} item\n\nAur search करें या "done" reply करें checkout के लिए 👇`,
+      hinglish: `✅ *${product.name}* cart mein add ho gaya!\n\n🛒 Cart: ${cart.length} item\n\nAur search karo ya "done" reply karo checkout ke liye 👇`,
+      english : `✅ *${product.name}* added to cart!\n\n🛒 Cart: ${cart.length} item${cart.length > 1 ? "s" : ""}\n\nSearch more or reply "done" to checkout 👇`,
+    };
+    return send(customerId, added[lang] || added.english);
   }
 
-  // Customer is searching again
+  // Treat as new search
   return handleSearch(customerId, sess, message, sess.name);
 }
 
-// ── Handler: Size Selection ────────────────────────────────────────────────────
+// ── Size Selection ─────────────────────────────────────────────────────────────
 async function startSizing(customerId, sess) {
-  const itemsNeedingSize = sess.cart.filter(i =>
-    i.hasSizes && !i.selectedSize
-  );
+  const lang         = sess.lang || "english";
+  const itemsNoSize  = (sess.cart || []).filter(i => i.hasSizes && !i.selectedSize);
 
-  if (!itemsNeedingSize.length) {
-    // No sizing needed — go straight to address
-    return startAddressCollection(customerId, sess);
-  }
+  if (!itemsNoSize.length) return startAddressCollection(customerId, sess);
 
-  const item = itemsNeedingSize[0];
+  const item   = itemsNoSize[0];
+  const sizes  = item.sizes || ["XS","S","M","L","XL","XXL"];
+  const avail  = sizes.map(s => `[ ${s} ]`).join("  ");
+
   session.update(customerId, { state: "sizing", sizingItem: item.id });
 
-  const sizes = item.sizes || ["XS", "S", "M", "L", "XL", "XXL"];
-  const available = sizes.map(s => `[ ${s} ]`).join("  ");
-
-  await manychat.send(customerId,
-    `📏 *Select size for:*\n` +
-    `*${item.name}* — ₹${item.price}\n\n` +
-    `${available}\n\n` +
-    `Reply the size (e.g. "M" or "L")`
-  );
+  const msgs = {
+    hindi   : `📏 *${item.name}* के लिए size चुनें:\n\n${avail}\n\nSize reply करें (e.g. "M")`,
+    hinglish: `📏 *${item.name}* ke liye size choose karo:\n\n${avail}\n\nSize reply karo (e.g. "M")`,
+    english : `📏 *Select size for ${item.name}:*\n\n${avail}\n\nReply the size (e.g. "M")`,
+  };
+  await send(customerId, msgs[lang] || msgs.english);
 }
 
 async function handleSizeSelection(customerId, sess, message) {
+  const lang    = sess.lang || "english";
   const size    = message.toUpperCase().trim();
-  const validSz = ["XS", "S", "M", "L", "XL", "XXL", "FREE SIZE", "28", "30", "32", "34", "36", "38", "40", "42"];
+  const validSz = ["XS","S","M","L","XL","XXL","FREESIZE","FREE SIZE","28","30","32","34","36","38","40","42"];
 
   if (!validSz.includes(size)) {
-    return manychat.send(customerId, `Invalid size "${message}". Please reply with a valid size like S, M, L, XL etc.`);
+    const invalid = {
+      hindi   : `"${message}" valid size नहीं है। S, M, L, XL जैसा reply करें।`,
+      hinglish: `"${message}" valid size nahi hai. S, M, L, XL jaisa reply karo.`,
+      english : `"${message}" is not a valid size. Reply S, M, L, XL etc.`,
+    };
+    return send(customerId, invalid[lang] || invalid.english);
   }
 
-  // Update size for the item being sized
-  const cart = sess.cart.map(item =>
-    item.id === sess.sizingItem ? { ...item, selectedSize: size } : item
+  const cart = (sess.cart || []).map(i =>
+    i.id === sess.sizingItem ? { ...i, selectedSize: size } : i
   );
   session.update(customerId, { cart });
 
-  // Check if more items need sizing
   const remaining = cart.filter(i => i.hasSizes && !i.selectedSize);
-  if (remaining.length) {
-    return startSizing(customerId, { ...sess, cart });
-  }
+  if (remaining.length) return startSizing(customerId, { ...sess, cart });
 
-  // All sizes selected — collect address
-  await manychat.send(customerId, `✅ All sizes selected!\n`);
+  const done = { hindi: "✅ सभी sizes select हो गए!\n", hinglish: "✅ Sab sizes select ho gaye!\n", english: "✅ All sizes selected!\n" };
+  await send(customerId, done[lang] || done.english);
   return startAddressCollection(customerId, { ...sess, cart });
 }
 
-// ── Handler: Address Collection ───────────────────────────────────────────────
+// ── Address Collection ─────────────────────────────────────────────────────────
 async function startAddressCollection(customerId, sess) {
+  const lang = sess.lang || "english";
   session.update(customerId, { state: "collecting_address" });
-  await manychat.send(customerId,
-    `📦 *Almost done!*\n\n` +
-    `Please send your delivery address:\n` +
-    `_(House/Flat no, Street, City, State, Pincode)_`
-  );
+
+  const msgs = {
+    hindi:
+      `📦 *लगभग हो गया!*\n\n` +
+      `अपना delivery address भेजें:\n` +
+      `_(घर नंबर, गली, शहर, राज्य, पिन कोड)_\n\n` +
+      `📍 या WhatsApp Location share करें automatic fill के लिए`,
+    hinglish:
+      `📦 *Almost done!*\n\n` +
+      `Apna delivery address bhejo:\n` +
+      `_(House no, Street, City, State, Pincode)_\n\n` +
+      `📍 Ya WhatsApp Location share karo auto-fill ke liye`,
+    english:
+      `📦 *Almost done!*\n\n` +
+      `Please send your delivery address:\n` +
+      `_(House/Flat no, Street, City, State, Pincode)_\n\n` +
+      `📍 Or share your WhatsApp Location for auto-fill`,
+  };
+  await send(customerId, msgs[lang] || msgs.english);
 }
 
 async function handleAddressCollection(customerId, sess, message) {
+  const lang = sess.lang || "english";
   session.update(customerId, { address: message, state: "collecting_mobile" });
-  await manychat.send(customerId, `📱 Your mobile number for delivery updates?`);
+
+  const msgs = {
+    hindi   : `📱 Delivery updates ke liye aapka mobile number? (10 digit)`,
+    hinglish: `📱 Delivery updates ke liye mobile number? (10 digit)`,
+    english : `📱 Your mobile number for delivery updates? (10 digits)`,
+  };
+  await send(customerId, msgs[lang] || msgs.english);
 }
 
 async function handleMobileCollection(customerId, sess, message) {
+  const lang   = sess.lang || "english";
   const mobile = message.replace(/\D/g, "");
+
   if (mobile.length < 10) {
-    return manychat.send(customerId, "Please enter a valid 10-digit mobile number.");
+    const err = { hindi: "10 digit valid mobile number enter करें।", hinglish: "10 digit valid number enter karo.", english: "Please enter a valid 10-digit mobile number." };
+    return send(customerId, err[lang] || err.english);
   }
 
-  session.update(customerId, { mobile, state: "awaiting_payment" });
+  session.update(customerId, { mobile, state: "choosing_payment" });
 
-  // Generate bill
+  // ── Check if customer has redeemable loyalty points ────────────────────────
+  const redeemInfo = loyalty.getRedeemInfo(customerId);
+  let loyaltyLine  = "";
+  if (redeemInfo.canRedeem) {
+    loyaltyLine = {
+      hindi   : `\n⭐ *Loyalty Points:* ${redeemInfo.points} pts → ₹${redeemInfo.maxDiscount} off available!\nReply *USE POINTS* to redeem before payment.`,
+      hinglish: `\n⭐ *Loyalty Points:* ${redeemInfo.points} pts → ₹${redeemInfo.maxDiscount} off available!\n*USE POINTS* reply karo redeem karne ke liye.`,
+      english : `\n⭐ *Loyalty Points:* ${redeemInfo.points} pts → ₹${redeemInfo.maxDiscount} off available!\nReply *USE POINTS* to redeem before paying.`,
+    }[lang] || "";
+  }
+
+  const msgs = {
+    hindi:
+      `💳 *Payment method choose करें:*\n\n` +
+      `1️⃣ Online (UPI / Card / Net Banking) — Razorpay\n` +
+      `2️⃣ 💵 Cash on Delivery (COD) — ₹30 extra charge${loyaltyLine}`,
+    hinglish:
+      `💳 *Payment method choose karo:*\n\n` +
+      `1️⃣ Online (UPI / Card / Net Banking) — Razorpay\n` +
+      `2️⃣ 💵 Cash on Delivery (COD) — ₹30 extra charge${loyaltyLine}`,
+    english:
+      `💳 *Choose payment method:*\n\n` +
+      `1️⃣ Online (UPI / Card / Net Banking) — Razorpay\n` +
+      `2️⃣ 💵 Cash on Delivery (COD) — ₹30 extra charge${loyaltyLine}`,
+  };
+  await send(customerId, msgs[lang] || msgs.english);
+}
+
+async function handlePaymentChoice(customerId, sess, message) {
+  const lang = sess.lang || "english";
+  const msg  = message.trim().toLowerCase();
+
+  // Loyalty points redemption
+  if (msg.includes("use points") || msg === "redeem") {
+    const redeemInfo = loyalty.getRedeemInfo(customerId);
+    if (!redeemInfo.canRedeem) {
+      const nopts = { hindi: "Enough points नहीं हैं अभी।", hinglish: "Abhi enough points nahi hain.", english: "You don't have enough points to redeem yet." };
+      return send(customerId, nopts[lang] || nopts.english);
+    }
+    const result = loyalty.redeemPoints(customerId, redeemInfo.maxSets);
+    session.update(customerId, { loyaltyDiscount: result.discountAmount });
+    const redeemed = {
+      hindi   : `✅ ${result.pointsUsed} points redeem हुए — ₹${result.discountAmount} discount!\n\nAbhi payment method choose करें:\n1️⃣ Online\n2️⃣ COD`,
+      hinglish: `✅ ${result.pointsUsed} points redeem ho gaye — ₹${result.discountAmount} discount!\n\nAb payment method:\n1️⃣ Online\n2️⃣ COD`,
+      english : `✅ ${result.pointsUsed} points redeemed — ₹${result.discountAmount} off!\n\nNow choose payment:\n1️⃣ Online\n2️⃣ COD`,
+    };
+    return send(customerId, redeemed[lang] || redeemed.english);
+  }
+
+  const isOnline = msg === "1" || msg.includes("online") || msg.includes("upi") || msg.includes("card") || msg.includes("razorpay");
+  const isCOD    = msg === "2" || msg.includes("cod") || msg.includes("cash");
+
+  if (!isOnline && !isCOD) {
+    const choose = { hindi: "1 (Online) या 2 (COD) reply करें।", hinglish: "1 (Online) ya 2 (COD) reply karo.", english: "Please reply 1 for Online or 2 for COD." };
+    return send(customerId, choose[lang] || choose.english);
+  }
+
+  await placeOrder(customerId, sess, isOnline ? "online" : "cod");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Order Creation + Billing
+// ─────────────────────────────────────────────────────────────────────────────
+async function placeOrder(customerId, sess, paymentMode) {
+  const lang = sess.lang || "english";
+
   const bill = billing.generate({
     cart    : sess.cart,
     address : sess.address,
-    mobile,
+    mobile  : sess.mobile,
     name    : sess.name,
+    extra   : paymentMode === "cod" ? 30 : 0, // COD fee
   });
 
-  // Create payment link
-  const payLink = await payment.createLink({
-    amount      : bill.total,
-    customerName: sess.name,
-    mobile,
-    description : `Order: ${bill.items.map(i => i.name).join(", ")}`,
-  });
+  // Apply loyalty discount if any
+  if (sess.loyaltyDiscount) {
+    bill.loyaltyDiscount = sess.loyaltyDiscount;
+    bill.total           = Math.max(0, bill.total - sess.loyaltyDiscount);
+  }
 
-  // Determine promo source — expires after 24 hours to avoid false attribution
   const promoSource = (() => {
     if (!sess.promoSource) return null;
     const age = Date.now() - (sess.promoSentAt || 0);
-    if (age > 24 * 60 * 60 * 1000) return null; // promo tag expired
-    return sess.promoSource;
+    return age > 24 * 60 * 60 * 1000 ? null : sess.promoSource;
   })();
 
-  // Calculate commission before saving order
   const commResult = commissionEngine.calculate(sess.cart, promoSource);
 
-  // Save order as pending
   const order = orders.create({
     customerId,
     name       : sess.name,
     cart       : sess.cart,
     address    : sess.address,
-    mobile,
+    mobile     : sess.mobile,
     bill,
-    payLink,
-    status     : "pending_payment",
-    promoSource,                                   // track how they found us
-    commission : commResult.commissionAmount || 0, // ₹ owed to Selly
+    paymentMode,
+    status     : paymentMode === "cod" ? "confirmed" : "pending_payment",
+    promoSource,
+    commission : commResult.commissionAmount || 0,
   });
 
-  // Record commission if applicable
   if (commResult.eligible) {
     commissionEngine.record(DEFAULT_BUSINESS_ID, order.id, sess.cart, promoSource);
-    console.log(`[commission] Order #${order.id} via ${promoSource} → ₹${commResult.commissionAmount} commission`);
   }
-
-  // Clear promo tag from session after attribution
-  session.update(customerId, { promoSource: null, promoSentAt: null });
-
-  // Track customer (bot-only customer base)
-  customers.touch(customerId, { name: sess.name, mobile });
+  session.update(customerId, { promoSource: null, promoSentAt: null, loyaltyDiscount: 0 });
+  customers.touch(customerId, { name: sess.name, mobile: sess.mobile });
   customers.recordOrder(customerId, order);
-
   session.update(customerId, { currentOrderId: order.id });
 
-  // Send bill summary
+  // ── Build order summary ────────────────────────────────────────────────────
   const itemLines = bill.items.map(i =>
-    `${i.name}${i.size ? ` (${i.size})` : ""}`.padEnd(28) + `₹${i.price}`
+    `${i.name}${i.size ? ` (${i.size})` : ""}`.padEnd(25) + `₹${i.price}` +
+    (i.bargained ? " ✂️" : "")
   ).join("\n");
 
-  await manychat.send(customerId,
+  const discountLine = sess.loyaltyDiscount
+    ? `Loyalty Discount    -₹${sess.loyaltyDiscount}\n`
+    : "";
+  const codLine      = paymentMode === "cod" ? `COD Charge          ₹30\n` : "";
+
+  const summary =
     `════════════════════════\n` +
     `🧾 *ORDER SUMMARY*\n` +
     `════════════════════════\n` +
     `${itemLines}\n` +
     `────────────────────────\n` +
     `Subtotal        ₹${bill.subtotal}\n` +
-    `Delivery           ₹${bill.delivery}\n` +
-    `GST (${bill.gstRate}%)       ₹${bill.gst}\n` +
+    `Delivery        ₹${bill.delivery}\n` +
+    `GST (${bill.gstRate}%)      ₹${bill.gst}\n` +
+    `${codLine}${discountLine}` +
     `────────────────────────\n` +
     `*TOTAL          ₹${bill.total}*\n` +
     `════════════════════════\n` +
     `📍 ${sess.address}\n` +
     `🚚 Delivery in 3-5 days\n` +
-    `════════════════════════\n\n` +
-    `💳 *Pay now:* ${payLink.url}\n` +
-    `_(Link valid for 30 minutes)_`
-  );
+    `════════════════════════`;
+
+  await send(customerId, summary);
+
+  if (paymentMode === "online") {
+    // ── Online payment ─────────────────────────────────────────────────────
+    const payLink = await payment.createLink({
+      amount      : bill.total,
+      customerName: sess.name,
+      mobile      : sess.mobile,
+      description : `Order: ${bill.items.map(i => i.name).join(", ")}`,
+    });
+
+    orders.create({ ...order, payLink }); // update with link
+    session.update(customerId, { state: "awaiting_payment", payLink });
+
+    const payMsg = {
+      hindi   : `\n💳 *Online payment करें:*\n${payLink.url}\n_(Link 30 मिनट में expire होगा)_\n\nPayment के बाद "paid" reply करें।`,
+      hinglish: `\n💳 *Online payment karo:*\n${payLink.url}\n_(Link 30 min mein expire hoga)_\n\nPayment ke baad "paid" reply karo.`,
+      english : `\n💳 *Pay now:*\n${payLink.url}\n_(Link expires in 30 minutes)_\n\nReply "paid" once done.`,
+    };
+    await send(customerId, payMsg[lang] || payMsg.english);
+
+  } else {
+    // ── COD confirmed ──────────────────────────────────────────────────────
+    await confirmOrder(customerId, order, false);
+  }
 }
 
-// ── Handler: Payment Check ────────────────────────────────────────────────────
+// ── Confirm order + loyalty points + invoice ───────────────────────────────────
+async function confirmOrder(customerId, order, isOnline = true) {
+  const lang = session.get(customerId)?.lang || "english";
+
+  orders.updateStatus(order.id, "confirmed");
+
+  // Award loyalty points
+  const orderAmount   = order.bill?.total || 0;
+  const basePoints    = loyalty.calcOrderPoints(orderAmount);
+  const isFirst       = loyalty.isFirstOrder(customerId);
+  const { pointsAdded } = loyalty.addPoints(customerId, basePoints, "purchase", order.id);
+
+  // First order bonus
+  let bonusPoints = 0;
+  if (isFirst) {
+    loyalty.addPoints(customerId, 50, "first_order", order.id);
+    bonusPoints = 50;
+  }
+
+  const totalAwarded  = pointsAdded + bonusPoints;
+  const loyaltyRecord = loyalty.getRecord(customerId);
+  const tier          = loyalty.getTier(loyaltyRecord.totalEarned);
+
+  session.reset(customerId);
+
+  const codNote  = order.paymentMode === "cod"
+    ? { hindi: "💵 Cash on delivery — delivery ke time payment karein.", hinglish: "💵 Cash on delivery — delivery ke time pay karna.", english: "💵 Pay cash on delivery when your order arrives." }
+    : { hindi: "", hinglish: "", english: "" };
+
+  const msgs = {
+    hindi:
+      `✅ *Order Confirmed!* 🎉\n\n` +
+      `Order ID: *#SL${order.id}*\n` +
+      `Amount: ₹${order.bill?.total}\n\n` +
+      (codNote.hindi ? codNote.hindi + "\n\n" : "") +
+      `⭐ *${totalAwarded} Selly Points earned!*\n` +
+      (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
+      `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
+      `🚚 Tracking updates यहाँ आएंगे।\n` +
+      `"track order" reply करें status check करने के लिए।`,
+
+    hinglish:
+      `✅ *Order Confirm ho gaya!* 🎉\n\n` +
+      `Order ID: *#SL${order.id}*\n` +
+      `Amount: ₹${order.bill?.total}\n\n` +
+      (codNote.hinglish ? codNote.hinglish + "\n\n" : "") +
+      `⭐ *${totalAwarded} Selly Points mile!*\n` +
+      (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
+      `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
+      `🚚 Tracking updates yahan aayenge.\n` +
+      `"track order" reply karo status check karne ke liye.`,
+
+    english:
+      `✅ *Order Confirmed!* 🎉\n\n` +
+      `Order ID: *#SL${order.id}*\n` +
+      `Amount: ₹${order.bill?.total}\n\n` +
+      (codNote.english ? codNote.english + "\n\n" : "") +
+      `⭐ *${totalAwarded} Selly Points earned!*\n` +
+      (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
+      `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
+      `🚚 You'll get tracking updates here.\n` +
+      `Reply "track order" anytime to check status.`,
+  };
+
+  await send(customerId, msgs[lang] || msgs.english);
+}
+
+// ── Payment check (customer types "paid") ─────────────────────────────────────
 async function handlePaymentCheck(customerId, sess, message) {
-  const msg = message.toLowerCase();
+  const lang = sess.lang || "english";
+  const msg  = message.toLowerCase();
+
   if (msg.includes("paid") || msg.includes("done") || msg.includes("payment")) {
     const isPaid = await payment.verify(sess.currentOrderId);
     if (isPaid) {
-      orders.updateStatus(sess.currentOrderId, "confirmed");
       const order = orders.get(sess.currentOrderId);
-      session.reset(customerId);
-
-      await manychat.send(customerId,
-        `✅ *Order Confirmed!*\n\n` +
-        `Order ID: #CF${order.id}\n` +
-        `Amount: ₹${order.bill.total}\n\n` +
-        `📄 Invoice sent!\n` +
-        `🚚 You'll get tracking updates here.\n\n` +
-        `Thank you for shopping! 🙏\n` +
-        `Reply "track order" anytime to check status.`
-      );
+      await confirmOrder(customerId, order, true);
     } else {
-      await manychat.send(customerId,
-        `Payment not received yet.\n\n` +
-        `💳 Pay here: ${sess.payLink?.url || "link expired"}\n\n` +
-        `Reply "cancel" to start over.`
-      );
+      const notPaid = {
+        hindi   : `Payment अभी receive नहीं हुई।\n\n💳 यहाँ pay करें: ${sess.payLink?.url || "link expired"}\n\n"cancel" reply करें start over के लिए।`,
+        hinglish: `Payment abhi receive nahi hui.\n\n💳 Yahan pay karo: ${sess.payLink?.url || "link expired"}\n\n"cancel" reply karo start over ke liye.`,
+        english : `Payment not received yet.\n\n💳 Pay here: ${sess.payLink?.url || "link expired"}\n\nReply "cancel" to start over.`,
+      };
+      await send(customerId, notPaid[lang] || notPaid.english);
     }
   }
 }
 
-// ── Handler: Order Tracking ───────────────────────────────────────────────────
+// ── Auto-confirm after Razorpay webhook ───────────────────────────────────────
+async function handlePaymentSuccess(paymentLinkId) {
+  // Find order by payment link ID
+  const allOrders = orders.getAll().orders || [];
+  const order     = allOrders.find(o => o.payLink?.id === paymentLinkId);
+  if (!order || order.status !== "pending_payment") return;
+  console.log(`[Payment] Auto-confirming order #SL${order.id}`);
+  await confirmOrder(order.customerId, order, true);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FEATURE: Loyalty Points Check
+// ─────────────────────────────────────────────────────────────────────────────
+async function handleLoyaltyCheck(customerId, sess) {
+  const lang   = sess.lang || "english";
+  const record = loyalty.getRecord(customerId);
+  const tier   = loyalty.getTier(record.totalEarned);
+  const redeem = loyalty.getRedeemInfo(customerId);
+
+  const msgs = {
+    hindi:
+      `⭐ *Aapke Selly Points*\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `${tier.emoji} *${tier.name} Member*\n` +
+      `💫 Balance: *${record.points} points*\n` +
+      `📊 Total earned: ${record.totalEarned} pts\n` +
+      `🛍️ Orders: ${record.ordersCount}\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      (redeem.canRedeem
+        ? `💸 *₹${redeem.maxDiscount} off* redeem kar sakte hain!\n` +
+          `Checkout mein "USE POINTS" reply karein.`
+        : `🎯 Sirf *${redeem.nextMilestone} aur points* chahiye ₹50 off ke liye!`),
+
+    hinglish:
+      `⭐ *Aapke Selly Points*\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `${tier.emoji} *${tier.name} Member*\n` +
+      `💫 Balance: *${record.points} points*\n` +
+      `📊 Total earned: ${record.totalEarned} pts\n` +
+      `🛍️ Orders: ${record.ordersCount}\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      (redeem.canRedeem
+        ? `💸 *₹${redeem.maxDiscount} off* redeem kar sakte ho!\n` +
+          `Checkout mein "USE POINTS" reply karo.`
+        : `🎯 Bas *${redeem.nextMilestone} aur points* chahiye ₹50 off ke liye!`),
+
+    english:
+      `⭐ *Your Selly Points*\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `${tier.emoji} *${tier.name} Member*\n` +
+      `💫 Balance: *${record.points} points*\n` +
+      `📊 Total earned: ${record.totalEarned} pts\n` +
+      `🛍️ Orders: ${record.ordersCount}\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      (redeem.canRedeem
+        ? `💸 You can redeem *₹${redeem.maxDiscount} off* your next order!\n` +
+          `Reply "USE POINTS" during checkout.`
+        : `🎯 Just *${redeem.nextMilestone} more points* to unlock ₹50 off!`),
+  };
+  await send(customerId, msgs[lang] || msgs.english);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Other handlers (tracking, returns, etc.)
+// ─────────────────────────────────────────────────────────────────────────────
 async function handleTracking(customerId, sess, message) {
   const customerOrders = orders.getByCustomer(customerId);
+  const lang           = sess.lang || "english";
 
   if (!customerOrders.length) {
-    return manychat.send(customerId, "You don't have any orders yet! Start shopping 😊");
+    const none = { hindi: "अभी कोई order नहीं है! Shopping start करें 😊", hinglish: "Abhi koi order nahi hai! Shopping karo 😊", english: "You don't have any orders yet! Start shopping 😊" };
+    return send(customerId, none[lang] || none.english);
   }
 
-  if (customerOrders.length === 1) {
-    return sendTrackingInfo(customerId, customerOrders[0]);
-  }
-
-  // Multiple orders — ask which one
-  const list = customerOrders.slice(0, 5).map((o, i) =>
-    `${i + 1}️⃣ #CF${o.id} — ${o.cart[0]?.name} — ${getStatusEmoji(o.status)} ${o.status}`
-  ).join("\n");
-
-  session.update(customerId, { state: "tracking_select", trackingOrders: customerOrders });
-  await manychat.send(customerId, `📦 *Your Orders:*\n\n${list}\n\nReply number to track`);
+  return sendTrackingInfo(customerId, customerOrders[0]);
 }
 
 async function sendTrackingInfo(customerId, order) {
   const timeline = buildTimeline(order);
-  await manychat.send(customerId,
+  await send(customerId,
     `════════════════════════\n` +
-    `📦 ORDER #CF${order.id}\n` +
+    `📦 ORDER #SL${order.id}\n` +
     `════════════════════════\n` +
-    `${order.cart.map(i => `${i.name}${i.selectedSize ? ` (${i.selectedSize})` : ""}`).join("\n")}\n` +
+    `${(order.cart || []).map(i => `${i.name}${i.selectedSize ? ` (${i.selectedSize})` : ""}`).join("\n")}\n` +
     `Total: ₹${order.bill?.total}\n` +
+    `Payment: ${order.paymentMode === "cod" ? "💵 COD" : "💳 Online"}\n` +
     `────────────────────────\n` +
     `${timeline}\n` +
     `════════════════════════\n` +
@@ -963,434 +927,454 @@ async function sendTrackingInfo(customerId, order) {
 
 function buildTimeline(order) {
   const steps = [
-    { key: "confirmed",       label: "Order Placed",       emoji: "✅" },
-    { key: "payment_received",label: "Payment Received",   emoji: "✅" },
-    { key: "packed",          label: "Packed",              emoji: "📦" },
-    { key: "shipped",         label: "Shipped",             emoji: "🚚" },
-    { key: "out_for_delivery",label: "Out for Delivery",    emoji: "🛵" },
-    { key: "delivered",       label: "Delivered",           emoji: "✅" },
+    { key: "confirmed",        label: "Order Placed",     emoji: "✅" },
+    { key: "packed",           label: "Packed",           emoji: "📦" },
+    { key: "shipped",          label: "Shipped",          emoji: "🚚" },
+    { key: "out_for_delivery", label: "Out for Delivery", emoji: "🛵" },
+    { key: "delivered",        label: "Delivered",        emoji: "✅" },
   ];
-
   const currentIdx = steps.findIndex(s => s.key === order.status);
-  return steps.map((s, i) =>
-    `${i <= currentIdx ? s.emoji : "⏳"} ${s.label}` +
-    (order.statusDates?.[s.key] ? `  _${order.statusDates[s.key]}_` : "")
-  ).join("\n");
+  return steps.map((s, i) => `${i <= currentIdx ? s.emoji : "⏳"} ${s.label}`).join("\n");
 }
 
-// ── Handler: Return Request ───────────────────────────────────────────────────
 async function handleReturn(customerId, sess, message) {
   const recent = orders.getByCustomer(customerId).find(o => o.status === "delivered");
+  const lang   = sess.lang || "english";
   if (!recent) {
-    return manychat.send(customerId, "No delivered orders found to return.");
+    const none = { hindi: "Return के लिए कोई delivered order नहीं है।", hinglish: "Return ke liye koi delivered order nahi hai.", english: "No delivered orders found to return." };
+    return send(customerId, none[lang] || none.english);
   }
-
   orders.updateStatus(recent.id, "return_requested");
-  await manychat.send(customerId,
-    `🔄 *Return Request Received*\n\n` +
-    `Order #CF${recent.id}\n` +
-    `We'll contact you within 24 hours.\n\n` +
-    `Please keep the item ready with original packaging.`
-  );
+  const msgs = {
+    hindi   : `🔄 *Return Request Received*\n\nOrder #SL${recent.id}\n24 घंटे में contact करेंगे।\nOriginal packaging के साथ item ready रखें।`,
+    hinglish: `🔄 *Return Request Mila!*\n\nOrder #SL${recent.id}\n24 hours mein contact karenge.\nOriginal packaging ke saath item ready rakho.`,
+    english : `🔄 *Return Request Received*\n\nOrder #SL${recent.id}\nWe'll contact you within 24 hours.\nPlease keep the item ready with original packaging.`,
+  };
+  await send(customerId, msgs[lang] || msgs.english);
 }
 
-// ── Handler: Order History ─────────────────────────────────────────────────────
 async function handleOrderHistory(customerId, sess) {
+  const lang      = sess.lang || "english";
   const allOrders = orders.getByCustomer(customerId);
   if (!allOrders.length) {
-    return manychat.send(customerId, "No orders yet! Start shopping 😊");
+    const none = { hindi: "अभी कोई order नहीं। Shopping शुरू करें! 😊", hinglish: "Abhi koi order nahi. Shopping karo! 😊", english: "No orders yet! Start shopping 😊" };
+    return send(customerId, none[lang] || none.english);
   }
-
   const list = allOrders.slice(0, 5).map(o =>
-    `#CF${o.id} — ${o.cart[0]?.name} — ₹${o.bill?.total} — ${getStatusEmoji(o.status)} ${o.status}`
+    `#SL${o.id} — ${(o.cart||[])[0]?.name} — ₹${o.bill?.total} — ${getStatusEmoji(o.status)} ${o.status}`
   ).join("\n");
-
-  await manychat.send(customerId, `📋 *Your Orders:*\n\n${list}`);
+  const header = { hindi: `📋 *आपके Orders:*\n\n${list}`, hinglish: `📋 *Aapke Orders:*\n\n${list}`, english: `📋 *Your Orders:*\n\n${list}` };
+  await send(customerId, header[lang] || header.english);
 }
 
-// ── Handler: Referral Code ────────────────────────────────────────────────────
 async function handleReferralCode(customerId) {
   const customer = customers.get(customerId);
-  if (!customer) {
-    return manychat.send(customerId, "Start shopping with us first and you'll get a referral code! 😊");
-  }
-
-  const code  = customer.referralCode;
-  const earn  = customer.referralEarnings || 0;
-  const count = customer.referralCount    || 0;
-
-  return manychat.send(customerId,
-    `🎟️ *Your Referral Code:*\n` +
-    `━━━━━━━━━━━━━━\n` +
-    `📌 Code: *${code}*\n` +
-    `━━━━━━━━━━━━━━\n\n` +
-    `Share this with friends!\n` +
-    `You earn *5% commission* every time someone orders using your code. 🎉\n\n` +
-    `📊 Stats: ${count} referral${count !== 1 ? "s" : ""} · ₹${earn} earned\n\n` +
-    `_Ask your friend to mention code *${code}* when ordering._`
+  if (!customer) return send(customerId, "Start shopping first to get a referral code! 😊");
+  const code = customer.referralCode;
+  await send(customerId,
+    `🎟️ *Your Referral Code:*\n━━━━━━━━\n📌 *${code}*\n━━━━━━━━\n\n` +
+    `Share with friends! You earn *5%* every time someone orders with your code.\n\n` +
+    `📊 ${customer.referralCount || 0} referrals · ₹${customer.referralEarnings || 0} earned`
   );
 }
 
-// ── Handler: Image Upload (Seller Toolkit) ────────────────────────────────────
 async function handleImageUpload(customerId, sess, imageUrl, name) {
-  await manychat.send(customerId, "✨ Generating content for your product...");
-
+  await send(customerId, "✨ Generating content for your product...");
   const content = await ai.generateProductContent(imageUrl);
-
-  await manychat.send(customerId,
+  await send(customerId,
     `📝 *Caption:*\n${content.caption}\n\n` +
     `#️⃣ *Hashtags:*\n${content.hashtags}\n\n` +
-    `🎵 *Music for Reel:*\n${content.music.map((m, i) => `${i + 1}. ${m}`).join("\n")}\n\n` +
     `💰 *Suggested Price:* ₹${content.suggestedPrice}`
   );
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+function isLoyaltyRequest(msg) {
+  const m = msg.toLowerCase();
+  return m.includes("points") || m.includes("loyalty") || m.includes("reward") ||
+         m.includes("mera points") || m.includes("kitne points") || m.includes("selly points");
+}
 function isTrackingRequest(msg) {
   const m = msg.toLowerCase();
-  return m.includes("track") || m.includes("where is my order") ||
-         m.includes("order status") || m.includes("delivery status") ||
-         m.includes("kahan hai") || m.includes("kab aayega");
+  return m.includes("track") || m.includes("order status") || m.includes("kahan hai") ||
+         m.includes("kab aayega") || m.includes("delivery status");
 }
-
 function isReturnRequest(msg) {
   const m = msg.toLowerCase();
-  return m.includes("return") || m.includes("refund") || m.includes("wrong") ||
-         m.includes("damaged") || m.includes("exchange");
+  return m.includes("return") || m.includes("refund") || m.includes("exchange") ||
+         m.includes("wrong") || m.includes("damaged");
 }
-
 function isOrderHistoryRequest(msg) {
   const m = msg.toLowerCase();
-  return m.includes("my orders") || m.includes("past orders") || m.includes("order history");
+  return m.includes("my orders") || m.includes("order history") || m.includes("past orders") ||
+         m.includes("mera order");
 }
-
 function isReferralRequest(msg) {
   const m = msg.toLowerCase();
-  return m.includes("referral") || m.includes("refer a friend") ||
-         m.includes("my code") || m.includes("referral code") ||
-         m.includes("refer") || m.includes("commission");
+  return m.includes("referral") || m.includes("refer") || m.includes("my code");
+}
+function getStatusEmoji(s) {
+  const map = { pending_payment:"⏳", confirmed:"✅", packed:"📦", shipped:"🚚", out_for_delivery:"🛵", delivered:"✅", return_requested:"🔄", cancelled:"❌" };
+  return map[s] || "📋";
 }
 
-function getStatusEmoji(status) {
-  const map = {
-    pending_payment : "⏳",
-    confirmed       : "✅",
-    packed          : "📦",
-    shipped         : "🚚",
-    out_for_delivery: "🛵",
-    delivered       : "✅",
-    return_requested: "🔄",
-    cancelled       : "❌",
+// ─────────────────────────────────────────────────────────────────────────────
+// DASHBOARD APIs (used by Selly mobile app)
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get ("/api/orders",        (req, res) => res.json({ stats: orders.getStats(), ...orders.getAll({ status: req.query.status, page: Number(req.query.page) || 1 }) }));
+app.get ("/api/stats",         (req, res) => res.json(orders.getStats()));
+app.get ("/api/customers",     (req, res) => res.json({ stats: customers.getStats(), ...customers.getAll({ tag: req.query.tag, page: Number(req.query.page) || 1 }) }));
+app.get ("/api/customers/stats",(req, res) => res.json(customers.getStats()));
+app.get ("/api/customers/:id", (req, res) => {
+  const c = customers.get(req.params.id);
+  if (!c) return res.status(404).json({ error: "Not found" });
+  res.json({ customer: c, orders: orders.getByCustomer(req.params.id) });
+});
+
+app.post("/api/orders/:id/status", (req, res) => {
+  const { status: newStatus, trackingNumber, trackingUrl } = req.body;
+  const updated = orders.updateStatus(req.params.id, newStatus, { trackingNumber, trackingUrl });
+  if (!updated) return res.status(404).json({ error: "Order not found" });
+
+  const msgs = {
+    packed          : "📦 Great news! Your order is packed and ready to ship.",
+    shipped         : `🚚 Your order is on the way!${trackingNumber ? ` Tracking: ${trackingNumber}` : ""}`,
+    out_for_delivery: "🛵 Out for delivery today! Please be available.",
+    delivered       : "✅ Delivered! Hope you love it 😊\nReply ⭐⭐⭐⭐⭐ to rate your experience.",
   };
-  return map[status] || "📋";
-}
-
-// ── Customer APIs ─────────────────────────────────────────────────────────────
-
-// GET  /api/customers        — all bot customers with stats
-app.get("/api/customers", (req, res) => {
-  const { tag, page } = req.query;
-  res.json({
-    stats: customers.getStats(),
-    ...customers.getAll({ tag, page: Number(page) || 1 }),
-  });
+  if (msgs[newStatus]) wa.send(updated.customerId, msgs[newStatus]).catch(() => {});
+  if (newStatus === "delivered") scheduleReviewRequest(updated.customerId, updated.id, updated.name);
+  res.json({ ok: true, order: updated });
 });
 
-// GET  /api/customers/stats  — just the stats
-app.get("/api/customers/stats", (req, res) => {
-  res.json(customers.getStats());
-});
-
-// ── Test Chat Endpoint (no Instagram needed) ──────────────────────────────────
-// Simulates ManyChat webhook — used by test-chat.html
-// Collects all bot replies and returns them as an array
-
-app.post("/test/chat", async (req, res) => {
-  const { subscriber_id, text, first_name = "TestUser", attachments } = req.body;
-  if (!subscriber_id) return res.status(400).json({ error: "subscriber_id required" });
-
-  // Collect replies instead of sending via ManyChat
-  const replies = [];
-  const originalSend = manychat.send.bind(manychat);
-
-  // Temporarily override manychat.send to capture replies
-  manychat._testMode  = true;
-  manychat._testReplies = replies;
-
+// ── Catalog APIs ──────────────────────────────────────────────────────────────
+app.get   ("/api/catalog",        (req, res) => res.json({ products: catalog.getAll() }));
+app.post  ("/api/catalog/add",    (req, res) => res.json({ ok: true, product: catalog.addProduct(req.body) }));
+app.put   ("/api/catalog/:id",    (req, res) => { const p = catalog.update(req.params.id, req.body); p ? res.json({ ok:true,p }) : res.status(404).json({ error:"Not found" }); });
+app.delete("/api/catalog/:id",    (req, res) => { const d = catalog.deleteProduct(req.params.id); d ? res.json({ ok:true }) : res.status(404).json({ error:"Not found" }); });
+app.post  ("/api/catalog/stock",  (req, res) => { const { id, inStock } = req.body; if (!id) return res.status(400).json({ error:"id required" }); const p = catalog.toggleStock(id, inStock); p ? res.json({ ok:true,p }) : res.status(404).json({ error:"Not found" }); });
+app.post  ("/api/catalog/upload", (req, res) => {
   try {
-    // Register / update customer
-    const customer = customers.touch(subscriber_id, { name: first_name, first_name });
-
-    // Process through the same webhook logic
-    let sess = session.get(subscriber_id) || session.create(subscriber_id, { name: first_name, first_name });
-
-    if (attachments?.length) {
-      await handleImageUpload(subscriber_id, sess, attachments[0].url, first_name);
-    } else if (text) {
-      await routeMessage(subscriber_id, sess, text.trim(), first_name);
-    }
-
-    // Get updated session for cart info
-    const updatedSess = session.get(subscriber_id);
-    const updatedCustomer = customers.get(subscriber_id);
-
-    // Suggest quick replies based on state
-    const quickReplies = getQuickReplies(updatedSess);
-
-    res.json({
-      replies,
-      customer     : updatedCustomer,
-      cart         : updatedSess?.cart || [],
-      sessionState : updatedSess?.state,
-      quickReplies,
-    });
-
-  } catch (err) {
-    console.error("[test/chat]", err.message);
-    res.json({ replies: ["⚠️ Error: " + err.message], customer: null, cart: [] });
-  } finally {
-    manychat._testMode    = false;
-    manychat._testReplies = null;
-  }
+    const imported = catalog.importCSV(typeof req.body === "string" ? req.body : JSON.stringify(req.body));
+    res.json({ ok: true, imported: imported.length });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+app.post("/api/insta/fetch", async (req, res) => {
+  const { url } = req.body;
+  if (!url || !instafetch.isInstaUrl(url)) return res.status(400).json({ ok:false, error:"Not a valid Instagram URL" });
+  try {
+    const data = await instafetch.fetchPostData(url);
+    res.json({ ok:true, imageUrl:data.imageUrl, caption:data.caption, name:instafetch.guessName(data.caption), category:instafetch.guessCategory(data.caption), colors:instafetch.guessColors(data.caption) });
+  } catch (err) { res.json({ ok:false, error:err.message }); }
 });
 
-function getQuickReplies(sess) {
-  if (!sess) return ["jeans", "kurti", "shirts"];
-  switch (sess.state) {
-    case "idle":
-    case "searching" : return ["👖 jeans", "👗 kurti", "👕 t-shirt", "📦 track order"];
-    case "selecting" : return sess.cart?.length ? ["✅ done", "🔍 search more"] : ["🔍 search more"];
-    case "sizing"    : return ["S", "M", "L", "XL", "XXL"];
-    case "awaiting_payment": return ["✅ I have paid", "❌ cancel"];
-    default          : return [];
+// ─────────────────────────────────────────────────────────────────────────────
+// FEATURE APIs: Status, Loyalty, Festivals
+// ─────────────────────────────────────────────────────────────────────────────
+
+// POST /api/status/log — Selly app calls this when business owner posts a status
+app.post("/api/status/log", (req, res) => {
+  const entry = status.logStatus(req.body);
+  res.json({ ok: true, entry });
+});
+
+// GET /api/status/active — list active statuses
+app.get("/api/status/active", (req, res) => {
+  res.json({ statuses: status.getActiveStatuses() });
+});
+
+// GET /api/loyalty/:customerId — get loyalty record
+app.get("/api/loyalty/:id", (req, res) => {
+  const record = loyalty.getRecord(req.params.id);
+  const tier   = loyalty.getTier(record.totalEarned);
+  res.json({ record, tier, redeemInfo: loyalty.getRedeemInfo(req.params.id) });
+});
+
+// GET /api/loyalty/leaderboard — top customers by points
+app.get("/api/loyalty/leaderboard", (req, res) => {
+  const allCustomers = customers.getAll().customers || [];
+  const leaderboard  = allCustomers.map(c => ({
+    ...c,
+    loyaltyRecord: loyalty.getRecord(c.id),
+    tier         : loyalty.getTier(loyalty.getRecord(c.id).totalEarned),
+  }))
+  .sort((a, b) => b.loyaltyRecord.points - a.loyaltyRecord.points)
+  .slice(0, 20);
+  res.json({ leaderboard });
+});
+
+// GET /api/festivals/upcoming — upcoming festivals
+app.get("/api/festivals/upcoming", (req, res) => {
+  const daysAhead = parseInt(req.query.days || "14");
+  res.json({ festivals: festivals.getUpcoming(daysAhead) });
+});
+
+// GET /api/festivals/alerts — festivals in their alert window today
+app.get("/api/festivals/alerts", (req, res) => {
+  res.json({ alerts: festivals.getAlertsForToday() });
+});
+
+// POST /api/promote/festival — broadcast a festival campaign
+app.post("/api/promote/festival", async (req, res) => {
+  const { festivalName, discount = 10, businessName = "our store" } = req.body;
+  if (!festivalName) return res.status(400).json({ error: "festivalName required" });
+
+  if (festivals.wasAlreadyBroadcast(festivalName)) {
+    return res.json({ ok: false, reason: "Already broadcast for this festival. Clear log to resend." });
   }
-}
 
-// ── Promotion APIs ────────────────────────────────────────────────────────────
+  const message = festivals.getCampaignMessage(festivalName, businessName, discount);
+  if (!message) return res.status(400).json({ error: "Unknown festival" });
 
-// POST /api/promote/flash   — broadcast flash sale to ALL bot customers
-app.post("/api/promote/flash", async (req, res) => {
-  const { message } = req.body;
-  if (!message) return res.status(400).json({ error: "message required" });
-
-  const allCustomers = customers.getAll().customers;
-  if (!allCustomers.length) return res.json({ ok: true, sent: 0 });
-
+  const allCustomers = customers.getAll().customers || [];
   let sent = 0;
   for (const c of allCustomers) {
     try {
-      await manychat.send(c.id, message);
-      // Tag this customer's session so next order is tracked as flash_sale
-      session.update(c.id, { promoSource: "flash_sale", promoSentAt: Date.now() });
+      await wa.send(c.id, message);
+      session.update(c.id, { promoSource: "festival_" + festivalName.toLowerCase().replace(/\s/g, "_"), promoSentAt: Date.now() });
       sent++;
-    } catch (err) {
-      console.error(`[promote/flash] Failed to send to ${c.id}:`, err.message);
-    }
+    } catch {}
   }
 
-  console.log(`[promote/flash] Sent to ${sent}/${allCustomers.length} customers`);
+  festivals.logBroadcast(festivalName, sent);
+  console.log(`[festival] ${festivalName} broadcast sent to ${sent} customers`);
   res.json({ ok: true, sent, total: allCustomers.length });
 });
 
-// POST /api/promote/newarrival — alert customers about a new product
-// Sends to customers who bought from same category, or ALL if no match
+// ── Existing promotion APIs ────────────────────────────────────────────────────
+app.post("/api/promote/flash", async (req, res) => {
+  const { message } = req.body;
+  if (!message) return res.status(400).json({ error: "message required" });
+  const allCustomers = customers.getAll().customers || [];
+  let sent = 0;
+  for (const c of allCustomers) {
+    try { await wa.send(c.id, message); session.update(c.id, { promoSource: "flash_sale", promoSentAt: Date.now() }); sent++; } catch {}
+  }
+  res.json({ ok: true, sent, total: allCustomers.length });
+});
+
 app.post("/api/promote/newarrival", async (req, res) => {
   const { productId } = req.body;
   if (!productId) return res.status(400).json({ error: "productId required" });
-
   const product = catalog.get(productId);
   if (!product) return res.status(404).json({ error: "Product not found" });
-
-  const message =
-    `🆕 *New Arrival!*\n\n` +
-    `✨ *${product.name}*\n` +
-    `💰 ${product.price > 0 ? `₹${product.price}` : "Contact for price"}\n` +
-    `🎨 ${(product.colors || []).join(", ") || "—"}\n` +
-    `📏 Sizes: ${(product.sizes || []).join(", ") || "One size"}\n\n` +
-    `Reply "show me ${product.category}" to see it now! 👇`;
-
-  // Target: customers who ordered from this category before → else all customers
-  const allCustomers = customers.getAll().customers;
-  const category     = product.category.toLowerCase();
-
-  const targeted = allCustomers.filter(c => {
-    const theirOrders = orders.getByCustomer(c.id);
-    return theirOrders.some(o =>
-      o.cart.some(item => item.category?.toLowerCase() === category)
-    );
-  });
-
-  const recipients = targeted.length ? targeted : allCustomers;
-
+  const msg =
+    `🆕 *New Arrival!*\n\n✨ *${product.name}*\n` +
+    `💰 ${product.price > 0 ? `₹${product.price}` : "Contact"}\n` +
+    `🎨 ${(product.colors||[]).join(", ")||"—"}\n` +
+    `📏 ${(product.sizes||[]).join(", ")||"One size"}\n\n` +
+    `Reply with the product name to order! 👇`;
+  const allCustomers = customers.getAll().customers || [];
   let sent = 0;
-  for (const c of recipients) {
-    try {
-      await manychat.send(c.id, message);
-      // Tag session so next purchase is tracked as new_arrival commission
-      session.update(c.id, { promoSource: "new_arrival", promoSentAt: Date.now() });
-      sent++;
-    } catch (err) {
-      console.error(`[promote/newarrival] Failed for ${c.id}:`, err.message);
-    }
+  for (const c of allCustomers) {
+    try { await wa.send(c.id, msg); session.update(c.id, { promoSource: "new_arrival", promoSentAt: Date.now() }); sent++; } catch {}
   }
-
-  console.log(`[promote/newarrival] Sent to ${sent} customers (targeted: ${targeted.length > 0})`);
-  res.json({ ok: true, sent, total: recipients.length, targeted: targeted.length > 0 });
+  res.json({ ok: true, sent });
 });
 
-// POST /api/promote/abandoned — manually trigger abandoned cart recovery blast
 app.post("/api/promote/abandoned", async (req, res) => {
   const recovered = await runAbandonedCartRecovery();
   res.json({ ok: true, sent: recovered });
 });
 
-// ── Single Customer API ────────────────────────────────────────────────────────
-app.get("/api/customers/:id", (req, res) => {
-  const customer = customers.get(req.params.id);
-  if (!customer) return res.status(404).json({ error: "Customer not found" });
-  const customerOrders = orders.getByCustomer(req.params.id);
-  res.json({ customer, orders: customerOrders });
+// ── Billing & Subscription APIs ───────────────────────────────────────────────
+app.get("/api/billing/summary",       (req, res) => {
+  const bid = req.query.businessId || DEFAULT_BUSINESS_ID;
+  const sub = subscriptions.get(bid);
+  res.json({ subscription: { status: sub.status, plan: sub.plan, monthlyFee: sub.monthlyFee, daysRemaining: subscriptions.daysRemaining(bid), isActive: subscriptions.isActive(bid) }, billing: commissionEngine.getMonthlySummary(bid, sub.monthlyFee) });
+});
+app.get("/api/billing/commissions",   (req, res) => res.json({ commissions: commissionEngine.getAll({ businessId: req.query.businessId || DEFAULT_BUSINESS_ID, month: req.query.month }) }));
+app.get("/api/billing/subscription",  (req, res) => {
+  const bid = req.query.businessId || DEFAULT_BUSINESS_ID;
+  res.json({ ...subscriptions.get(bid), isActive: subscriptions.isActive(bid), daysRemaining: subscriptions.daysRemaining(bid) });
+});
+app.post("/api/billing/payment",      (req, res) => {
+  const { businessId = DEFAULT_BUSINESS_ID, amount, paymentId, method } = req.body;
+  res.json({ ok: true, subscription: subscriptions.recordPayment(businessId, { amount, paymentId, method }) });
 });
 
-// ── Abandoned Cart Recovery Engine ────────────────────────────────────────────
-// Every hour: check for carts abandoned > 2 hours ago and send a nudge
-const CART_TIMEOUT_MS    = 2  * 60 * 60 * 1000; // 2 hours
-const RECOVERY_INTERVAL  = 60 * 60 * 1000;        // check every 1 hour
+// ─────────────────────────────────────────────────────────────────────────────
+// TEST CHAT (no WhatsApp needed — used by test-chat.html)
+// ─────────────────────────────────────────────────────────────────────────────
+app.post("/test/chat", async (req, res) => {
+  const { subscriber_id, text, first_name = "TestUser" } = req.body;
+  if (!subscriber_id) return res.status(400).json({ error: "subscriber_id required" });
+
+  const replies = [];
+  wa._testMode    = true;
+  wa._testReplies = replies;
+
+  try {
+    customers.touch(subscriber_id, { name: first_name, first_name });
+    let sess = session.get(subscriber_id) || session.create(subscriber_id, { name: first_name, first_name });
+
+    if (!sess.lang) {
+      const detected = language.detectLanguage(text);
+      session.update(subscriber_id, { lang: detected });
+      sess = session.get(subscriber_id);
+    }
+
+    if (text) await routeMessage(subscriber_id, sess, text.trim(), first_name);
+
+    const updatedSess = session.get(subscriber_id);
+    res.json({
+      replies,
+      cart        : updatedSess?.cart || [],
+      sessionState: updatedSess?.state,
+      lang        : updatedSess?.lang,
+      loyalty     : loyalty.getRedeemInfo(subscriber_id),
+    });
+  } catch (err) {
+    res.json({ replies: ["⚠️ Error: " + err.message], cart: [] });
+  } finally {
+    wa._testMode    = false;
+    wa._testReplies = null;
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BACKGROUND JOBS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Abandoned cart recovery (every 1 hour)
+const CART_TIMEOUT_MS   = 2 * 60 * 60 * 1000;
+const RECOVERY_INTERVAL = 60 * 60 * 1000;
 
 async function runAbandonedCartRecovery() {
-  const now      = Date.now();
-  const allSess  = session.all();
-  let   sent     = 0;
-
-  for (const sess of allSess) {
-    // Must have items in cart, not already in payment flow, not already nudged
-    if (
-      !sess.cart?.length ||
-      sess.state === "awaiting_payment" ||
-      sess.abandonedNudgeSent
-    ) continue;
-
-    const idleTime = now - (sess.updatedAt || sess.createdAt || 0);
-    if (idleTime < CART_TIMEOUT_MS) continue;
-
-    const itemNames = sess.cart.map(i => i.name).join(", ");
-    const total     = sess.cart.reduce((s, i) => s + (i.price || 0), 0);
-
+  const now = Date.now(); let sent = 0;
+  for (const sess of session.all()) {
+    if (!sess.cart?.length || sess.state === "awaiting_payment" || sess.abandonedNudgeSent) continue;
+    if (now - (sess.updatedAt || 0) < CART_TIMEOUT_MS) continue;
+    const lang  = sess.lang || "english";
+    const names = sess.cart.map(i => i.name).join(", ");
+    const total = sess.cart.reduce((s, i) => s + (i.price || 0), 0);
+    const msgs  = {
+      hindi   : `${sess.name || "जी"}! 👋 आपने cart में कुछ छोड़ा था 🛒\n\n*${names}*\nTotal: ₹${total}\n\n"done" reply करें checkout के लिए! 🎁`,
+      hinglish: `Hey ${sess.name || "yaar"}! 👋 Cart mein kuch chhod aaye ho 🛒\n\n*${names}*\nTotal: ₹${total}\n\n"done" reply karo checkout ke liye! 🎁`,
+      english : `Hey ${sess.name || "there"}! 👋 You left something behind 🛒\n\n*${names}*\nTotal: ₹${total}\n\nReply "done" to complete your order! 🎁`,
+    };
     try {
-      await manychat.send(sess.customerId,
-        `Hey ${sess.name || "there"}! 👋 You left something behind 🛒\n\n` +
-        `*Your cart:* ${itemNames}\n` +
-        `*Estimated total:* ₹${total}\n\n` +
-        `Ready to complete your order? Reply "done" to checkout! 🎁\n` +
-        `_(Reply "cancel" to clear your cart)_`
-      );
+      await wa.send(sess.customerId, msgs[lang] || msgs.english);
       session.update(sess.customerId, { abandonedNudgeSent: true, promoSource: "abandoned_cart", promoSentAt: Date.now() });
       sent++;
-    } catch (err) {
-      console.error(`[abandoned-cart] Error sending to ${sess.customerId}:`, err.message);
-    }
+    } catch {}
   }
-
   if (sent) console.log(`[abandoned-cart] Recovered ${sent} carts`);
   return sent;
 }
-
-// Run abandoned cart recovery on an interval
 setInterval(runAbandonedCartRecovery, RECOVERY_INTERVAL);
 
-// ── Review Pipeline: request review after delivery ────────────────────────────
-// Triggered from the order status update API when status becomes "delivered"
-// (already sends a "How was your experience? ⭐⭐⭐⭐⭐" in the DM above)
-// Additionally schedule a follow-up review request 24 hours later
+// Auto-broadcast festival campaigns (check every 6 hours)
+async function checkFestivalBroadcasts() {
+  const alerts = festivals.getAlertsForToday();
+  for (const f of alerts) {
+    if (!festivals.wasAlreadyBroadcast(f.name)) {
+      console.log(`[festival] Auto-alert: ${f.name} is coming up — use /api/promote/festival to broadcast.`);
+      // We log but don't auto-send — business owner should confirm
+    }
+  }
+}
+setInterval(checkFestivalBroadcasts, 6 * 60 * 60 * 1000);
+checkFestivalBroadcasts(); // run once on startup
+
+// Review request (24h after delivery)
 function scheduleReviewRequest(customerId, orderId, customerName) {
   setTimeout(async () => {
     try {
       const order = orders.get(orderId);
-      if (!order || order.status !== "delivered") return; // cancelled or returned
-      await manychat.send(customerId,
-        `Hi ${customerName}! 😊\n\n` +
-        `How was your experience with order #CF${orderId}?\n\n` +
-        `⭐ Reply 1 — Poor\n` +
-        `⭐⭐⭐ Reply 3 — Good\n` +
-        `⭐⭐⭐⭐⭐ Reply 5 — Excellent!\n\n` +
-        `Your feedback helps us improve 🙏`
-      );
+      if (!order || order.status !== "delivered") return;
+      const lang = session.get(customerId)?.lang || "english";
+      const msgs = {
+        hindi   : `नमस्ते ${customerName}! 😊\nOrder #SL${orderId} कैसा लगा?\n\n⭐1 Poor · ⭐⭐⭐3 Good · ⭐⭐⭐⭐⭐5 Excellent\n\nFeedback दें! 🙏`,
+        hinglish: `Hey ${customerName}! 😊\nOrder #SL${orderId} kaisa laga?\n\n⭐1 Poor · ⭐⭐⭐3 Good · ⭐⭐⭐⭐⭐5 Excellent\n\nFeedback do! 🙏`,
+        english : `Hi ${customerName}! 😊\nHow was your order #SL${orderId}?\n\n⭐1 Poor · ⭐⭐⭐3 Good · ⭐⭐⭐⭐⭐5 Excellent\n\nYour feedback helps us improve 🙏`,
+      };
+      await wa.send(customerId, msgs[lang] || msgs.english);
     } catch {}
-  }, 24 * 60 * 60 * 1000); // 24 hours later
+  }, 24 * 60 * 60 * 1000);
 }
 
-// ── Billing & Subscription APIs ───────────────────────────────────────────────
+// Seller catalog builder webhook (legacy — kept working)
+const sellerSessions = new Map();
+app.post("/webhook/seller", async (req, res) => {
+  res.sendStatus(200);
+  const { subscriber_id, text, attachments } = req.body;
+  if (!subscriber_id) return;
+  const businessId = String(subscriber_id);
+  const message    = (text || "").trim();
+  const msgLower   = message.toLowerCase();
+  let   sess       = sellerSessions.get(businessId) || { step: "idle" };
 
-// GET /api/billing/summary  — monthly bill breakdown
-app.get("/api/billing/summary", (req, res) => {
-  const businessId = req.query.businessId || DEFAULT_BUSINESS_ID;
-  const sub        = subscriptions.get(businessId);
-  const summary    = commissionEngine.getMonthlySummary(businessId, sub.monthlyFee);
-
-  res.json({
-    subscription: {
-      status       : sub.status,
-      plan         : sub.plan,
-      monthlyFee   : sub.monthlyFee,
-      daysRemaining: subscriptions.daysRemaining(businessId),
-      trialEnds    : sub.trialEnds,
-      paidUntil    : sub.paidUntil,
-      isActive     : subscriptions.isActive(businessId),
-    },
-    billing: summary,
-  });
-});
-
-// GET /api/billing/commissions  — list commissions this month
-app.get("/api/billing/commissions", (req, res) => {
-  const businessId = req.query.businessId || DEFAULT_BUSINESS_ID;
-  const month      = req.query.month;  // optional: "2026-04"
-  res.json({ commissions: commissionEngine.getAll({ businessId, month }) });
-});
-
-// POST /api/billing/payment  — record a manual payment (subscription renewal)
-app.post("/api/billing/payment", (req, res) => {
-  const { businessId = DEFAULT_BUSINESS_ID, amount, paymentId, method } = req.body;
-  const sub = subscriptions.recordPayment(businessId, { amount, paymentId, method });
-  res.json({ ok: true, subscription: sub });
-});
-
-// POST /api/billing/commissions/record  — record commission (used by tests + admin)
-app.post("/api/billing/commissions/record", (req, res) => {
-  const { businessId = DEFAULT_BUSINESS_ID, orderId, cart, promoSource } = req.body;
-  const result = commissionEngine.calculate(cart || [], promoSource);
-  if (!result.eligible) return res.json({ ok: true, eligible: false, commissionAmount: 0 });
-  const entry = commissionEngine.record(businessId, orderId, cart, promoSource);
-  res.json({ ok: true, eligible: true, commissionAmount: entry.commissionAmount, entry });
-});
-
-// GET /api/billing/subscription  — current subscription status
-app.get("/api/billing/subscription", (req, res) => {
-  const businessId = req.query.businessId || DEFAULT_BUSINESS_ID;
-  res.json({
-    ...subscriptions.get(businessId),
-    isActive     : subscriptions.isActive(businessId),
-    daysRemaining: subscriptions.daysRemaining(businessId),
-  });
-});
-
-// ── Subscription gate middleware ──────────────────────────────────────────────
-// Called before routing customer messages — blocks bot if subscription lapsed
-function checkSubscription(businessId) {
-  if (!subscriptions.isActive(businessId)) {
-    console.warn(`[subscription] Business ${businessId} subscription lapsed — bot paused`);
-    return false;
+  if (instafetch.isInstaUrl(message)) {
+    await wa.send(businessId, "⏳ Fetching post...");
+    try {
+      const postData = await instafetch.fetchPostData(message);
+      sess = { step: "ask_price", pendingProduct: { instaPostUrl: message, imageUrl: postData.imageUrl||"", description: postData.caption||"", name: instafetch.guessName(postData.caption), category: instafetch.guessCategory(postData.caption), colors: instafetch.guessColors(postData.caption) } };
+      sellerSessions.set(businessId, sess);
+      return wa.send(businessId, `✅ Got your post!\n\n💰 What's the price?\n_(e.g. 799 or "contact")_`);
+    } catch {
+      sess = { step: "ask_price", pendingProduct: { instaPostUrl: message, imageUrl:"", description:"", name:"", category:"general", colors:[] } };
+      sellerSessions.set(businessId, sess);
+      return wa.send(businessId, `✅ Got your post link!\n\n💰 What's the price?`);
+    }
   }
-  return true;
-}
 
-// Patch the order status update route to also schedule review requests
-const _origUpdateRoute = app._router?.stack; // we wire it inside the handler below
+  switch (sess.step) {
+    case "ask_price": {
+      const isContact = msgLower === "contact" || msgLower === "0";
+      const priceVal  = isContact ? 0 : parseFloat(message.replace(/[^0-9.]/g,""));
+      if (!isContact && (isNaN(priceVal)||priceVal<0)) return wa.send(businessId, `Enter a valid price (e.g. "799") or "contact"`);
+      sess.pendingProduct.price = isContact ? 0 : priceVal;
+      sess.pendingProduct.contactForPrice = isContact;
+      sess.step = sess.pendingProduct.name ? "ask_sizes" : "ask_name";
+      sellerSessions.set(businessId, sess);
+      return wa.send(businessId, sess.step === "ask_sizes"
+        ? `💰 ₹${priceVal} set!\n\n📏 Sizes? (e.g. S,M,L or "no")`
+        : `💰 Set!\n\n📝 Product name?`);
+    }
+    case "ask_name": {
+      sess.pendingProduct.name = message;
+      sess.step = "ask_sizes";
+      sellerSessions.set(businessId, sess);
+      return wa.send(businessId, `📏 Sizes? (e.g. S,M,L or "no")`);
+    }
+    case "ask_sizes": {
+      sess.pendingProduct.sizes = msgLower === "no" ? [] : message.split(/[,;]/).map(s=>s.trim().toUpperCase()).filter(Boolean);
+      if (sess.pendingProduct.colors?.length) { return saveProduct(businessId, sess); }
+      sess.step = "ask_colors";
+      sellerSessions.set(businessId, sess);
+      return wa.send(businessId, `🎨 Colors? (e.g. Red,Blue or "no")`);
+    }
+    case "ask_colors": {
+      sess.pendingProduct.colors = msgLower === "no" ? [] : message.split(/[,;]/).map(c=>c.trim()).filter(Boolean);
+      return saveProduct(businessId, sess);
+    }
+    default:
+      sellerSessions.set(businessId, { step: "idle" });
+      return wa.send(businessId, `👋 Send an Instagram post link or photo to add products. Type "list" to see catalog.`);
+  }
+});
+
+async function saveProduct(businessId, sess) {
+  const product = catalog.addProduct(sess.pendingProduct);
+  sellerSessions.set(businessId, { step: "idle" });
+  await wa.send(businessId,
+    `✅ *Product Added!*\n━━━━━━━━━━━━━━━━\n` +
+    `📦 *${product.name||"Unnamed"}*\n` +
+    `💰 ${product.price>0?`₹${product.price}`:"Contact"}\n` +
+    `📏 ${product.sizes?.length?product.sizes.join(", "):"One size"}\n` +
+    `🎨 ${product.colors?.length?product.colors.join(", "):"—"}\n` +
+    `━━━━━━━━━━━━━━━━\nSend another link or photo to add more! 📸`
+  );
+}
 
 // ── Start server ──────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`[CodeForge Instagram Bot] Running on port ${PORT}`);
-  console.log(`[ManyChat webhook] POST http://your-server.com/webhook/manychat`);
+  console.log(`[Selly Bot] Running on port ${PORT} 🚀`);
+  console.log(`[Selly Bot] Features: multi-language · status-reply · loyalty · bargaining · festivals · COD+Razorpay`);
 });
 
 module.exports = app;
