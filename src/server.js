@@ -9,6 +9,7 @@ const bodyParser = require("body-parser");
 const path       = require("path");
 const session    = require("./session");
 const manychat   = require("./manychat");
+const whatsapp   = require("./whatsapp");
 const catalog    = require("./catalog");
 const orders     = require("./orders");
 const customers  = require("./customers");
@@ -44,8 +45,69 @@ app.use(express.static(path.join(__dirname, "../public")));
 // ── Health check ───────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.json({ status: "CodeForge Instagram Bot running" }));
 
-// ── Meta / Instagram Webhook ───────────────────────────────────────────────────
+// ── Meta / Instagram / WhatsApp Webhook ───────────────────────────────────────
 const VERIFY_TOKEN = "selly123";
+
+// ── WhatsApp Webhook Verification (GET) ───────────────────────────────────────
+app.get("/webhook/whatsapp", (req, res) => {
+  const mode      = req.query["hub.mode"];
+  const token     = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("[WhatsApp Webhook] Verified successfully");
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+// ── WhatsApp Webhook Receive Messages (POST) ───────────────────────────────────
+app.post("/webhook/whatsapp", async (req, res) => {
+  res.sendStatus(200); // Always respond immediately
+
+  try {
+    const body = req.body;
+    if (body.object !== "whatsapp_business_account") return;
+
+    for (const entry of body.entry || []) {
+      for (const change of entry.changes || []) {
+        const value    = change.value;
+        const messages = value?.messages || [];
+
+        for (const msg of messages) {
+          const senderId = msg.from;          // WhatsApp phone number
+          const text     = msg.text?.body || "";
+          const msgType  = msg.type;
+
+          if (!senderId) continue;
+
+          console.log(`[WhatsApp] Message from ${senderId}: ${text}`);
+
+          const customerId = senderId;
+          const name       = value.contacts?.[0]?.profile?.name || "Customer";
+          const first_name = name.split(" ")[0];
+          const last_name  = name.split(" ").slice(1).join(" ");
+
+          // Use WhatsApp sender for replies
+          process.env.WHATSAPP_REPLY_TO = senderId;
+
+          let sess = session.get(customerId) || session.create(customerId, { name, first_name, last_name });
+
+          if (msgType === "image") {
+            const imageUrl = msg.image?.url || "";
+            if (imageUrl) {
+              await handleImageUpload(customerId, sess, imageUrl, name);
+              continue;
+            }
+          }
+
+          if (text) await routeMessage(customerId, sess, text, name);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[WhatsApp Webhook Error]", err.message);
+  }
+});
 
 // Verification (GET) — Meta calls this to verify the webhook
 app.get("/webhook/instagram", (req, res) => {

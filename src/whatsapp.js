@@ -1,0 +1,86 @@
+// ── WhatsApp Cloud API Sender ──────────────────────────────────────────────────
+const https = require("https");
+
+const WA_TOKEN   = process.env.WHATSAPP_TOKEN    || "";
+const PHONE_ID   = process.env.WHATSAPP_PHONE_ID || "";
+
+// ── Send a text message ───────────────────────────────────────────────────────
+async function send(to, text) {
+  if (!WA_TOKEN || !PHONE_ID) {
+    console.log(`[WhatsApp MOCK] → ${to}: ${text.slice(0, 80)}`);
+    return;
+  }
+
+  const body = JSON.stringify({
+    messaging_product: "whatsapp",
+    to,
+    type: "text",
+    text: { body: sanitize(text) },
+  });
+
+  return apiPost(`/${PHONE_ID}/messages`, body);
+}
+
+// ── Send product list as text ─────────────────────────────────────────────────
+async function sendProductCards(to, products) {
+  const text = products.slice(0, 10).map((p, i) => {
+    const priceStr = p.price > 0 ? `₹${p.price}` : "Contact";
+    const sizeStr  = p.sizes?.length ? `\n   Sizes: ${p.sizes.slice(0, 4).join(", ")}` : "";
+    const colorStr = p.colors?.length ? `\n   Colors: ${p.colors.slice(0, 3).join(", ")}` : "";
+    return `${i + 1}. *${p.name}* — ${priceStr}${sizeStr}${colorStr}`;
+  }).join("\n\n");
+
+  return send(to, `📦 *Our Products:*\n\n${text}\n\nReply with the number to order.`);
+}
+
+// ── Send quick replies as numbered list ───────────────────────────────────────
+async function sendQuickReplies(to, text, replies) {
+  const replyText = `${text}\n\n${replies.map((r, i) => `${i + 1}. ${r}`).join("\n")}`;
+  return send(to, replyText);
+}
+
+// ── Send invoice notification ─────────────────────────────────────────────────
+async function sendInvoice(to, pdfBuffer, filename) {
+  return send(to, `🧾 *Invoice Generated*\nInvoice No: ${filename}\nThank you for your order!`);
+}
+
+// ── Internal API call ─────────────────────────────────────────────────────────
+function apiPost(path, bodyStr) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: "graph.facebook.com",
+      path    : `/v21.0${path}`,
+      method  : "POST",
+      headers : {
+        "Authorization" : `Bearer ${WA_TOKEN}`,
+        "Content-Type"  : "application/json",
+        "Content-Length": Buffer.byteLength(bodyStr),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.error) console.error("[WhatsApp API Error]", parsed.error.message);
+          else console.log("[WhatsApp] Message sent successfully");
+          resolve(parsed);
+        } catch { resolve({}); }
+      });
+    });
+
+    req.on("error", (err) => {
+      console.error("[WhatsApp Request Error]", err.message);
+      reject(err);
+    });
+
+    req.write(bodyStr);
+    req.end();
+  });
+}
+
+function sanitize(text) { return text.slice(0, 4096); }
+
+module.exports = { send, sendProductCards, sendQuickReplies, sendInvoice };
