@@ -293,7 +293,7 @@ async function handleStatusProductResponse(customerId, sess, message) {
 
   if (num === 1 && product?.productId) {
     // Show product details
-    const p = catalog.get(product.productId);
+    const p = await catalog.get(product.productId);
     if (p) {
       session.update(customerId, { state: "selecting", searchResults: [p] });
       const priceStr = p.price > 0 ? `₹${p.price}` : "Contact for price";
@@ -356,7 +356,7 @@ async function handleSearch(customerId, sess, message, name) {
     return send(customerId, greets[lang] || greets.english);
   }
 
-  const searchResult = catalog.search(intent);
+  const searchResult = await catalog.search(intent);
   const results      = searchResult.results || searchResult;
 
   if (!results.length) {
@@ -683,7 +683,7 @@ async function placeOrder(customerId, sess, paymentMode) {
 
   const commResult = commissionEngine.calculate(sess.cart, promoSource);
 
-  const order = orders.create({
+  const order = await orders.create({
     customerId,
     name       : sess.name,
     cart       : sess.cart,
@@ -700,8 +700,8 @@ async function placeOrder(customerId, sess, paymentMode) {
     commissionEngine.record(DEFAULT_BUSINESS_ID, order.id, sess.cart, promoSource);
   }
   session.update(customerId, { promoSource: null, promoSentAt: null, loyaltyDiscount: 0 });
-  customers.touch(customerId, { name: sess.name, mobile: sess.mobile });
-  customers.recordOrder(customerId, order);
+  await customers.touch(customerId, { name: sess.name, mobile: sess.mobile });
+  await customers.recordOrder(customerId, order);
   session.update(customerId, { currentOrderId: order.id });
 
   // ── Build order summary ────────────────────────────────────────────────────
@@ -743,7 +743,7 @@ async function placeOrder(customerId, sess, paymentMode) {
       description : `Order: ${bill.items.map(i => i.name).join(", ")}`,
     });
 
-    orders.create({ ...order, payLink }); // update with link
+    await orders.updatePayLink(order.id, payLink);
     session.update(customerId, { state: "awaiting_payment", payLink });
 
     const payMsg = {
@@ -763,7 +763,7 @@ async function placeOrder(customerId, sess, paymentMode) {
 async function confirmOrder(customerId, order, isOnline = true) {
   const lang = session.get(customerId)?.lang || "english";
 
-  orders.updateStatus(order.id, "confirmed");
+  await orders.updateStatus(order.id, "confirmed");
 
   // Award loyalty points
   const orderAmount   = order.bill?.total || 0;
@@ -834,7 +834,7 @@ async function handlePaymentCheck(customerId, sess, message) {
   if (msg.includes("paid") || msg.includes("done") || msg.includes("payment")) {
     const isPaid = await payment.verify(sess.currentOrderId);
     if (isPaid) {
-      const order = orders.get(sess.currentOrderId);
+      const order = await orders.get(sess.currentOrderId);
       await confirmOrder(customerId, order, true);
     } else {
       const notPaid = {
@@ -850,7 +850,8 @@ async function handlePaymentCheck(customerId, sess, message) {
 // ── Auto-confirm after Razorpay webhook ───────────────────────────────────────
 async function handlePaymentSuccess(paymentLinkId) {
   // Find order by payment link ID
-  const allOrders = orders.getAll().orders || [];
+  const _res      = await orders.getAll();
+  const allOrders = _res.orders || [];
   const order     = allOrders.find(o => o.payLink?.id === paymentLinkId);
   if (!order || order.status !== "pending_payment") return;
   console.log(`[Payment] Auto-confirming order #SL${order.id}`);
@@ -913,7 +914,7 @@ async function handleLoyaltyCheck(customerId, sess) {
 // Other handlers (tracking, returns, etc.)
 // ─────────────────────────────────────────────────────────────────────────────
 async function handleTracking(customerId, sess, message) {
-  const customerOrders = orders.getByCustomer(customerId);
+  const customerOrders = await orders.getByCustomer(customerId);
   const lang           = sess.lang || "english";
 
   if (!customerOrders.length) {
@@ -953,13 +954,14 @@ function buildTimeline(order) {
 }
 
 async function handleReturn(customerId, sess, message) {
-  const recent = orders.getByCustomer(customerId).find(o => o.status === "delivered");
-  const lang   = sess.lang || "english";
+  const _cOrders = await orders.getByCustomer(customerId);
+  const recent   = _cOrders.find(o => o.status === "delivered");
+  const lang     = sess.lang || "english";
   if (!recent) {
     const none = { hindi: "Return के लिए कोई delivered order नहीं है।", hinglish: "Return ke liye koi delivered order nahi hai.", english: "No delivered orders found to return." };
     return send(customerId, none[lang] || none.english);
   }
-  orders.updateStatus(recent.id, "return_requested");
+  await orders.updateStatus(recent.id, "return_requested");
   const msgs = {
     hindi   : `🔄 *Return Request Received*\n\nOrder #SL${recent.id}\n24 घंटे में contact करेंगे।\nOriginal packaging के साथ item ready रखें।`,
     hinglish: `🔄 *Return Request Mila!*\n\nOrder #SL${recent.id}\n24 hours mein contact karenge.\nOriginal packaging ke saath item ready rakho.`,
@@ -970,7 +972,7 @@ async function handleReturn(customerId, sess, message) {
 
 async function handleOrderHistory(customerId, sess) {
   const lang      = sess.lang || "english";
-  const allOrders = orders.getByCustomer(customerId);
+  const allOrders = await orders.getByCustomer(customerId);
   if (!allOrders.length) {
     const none = { hindi: "अभी कोई order नहीं। Shopping शुरू करें! 😊", hinglish: "Abhi koi order nahi. Shopping karo! 😊", english: "No orders yet! Start shopping 😊" };
     return send(customerId, none[lang] || none.english);
@@ -983,7 +985,7 @@ async function handleOrderHistory(customerId, sess) {
 }
 
 async function handleReferralCode(customerId) {
-  const customer = customers.get(customerId);
+  const customer = await customers.get(customerId);
   if (!customer) return send(customerId, "Start shopping first to get a referral code! 😊");
   const code = customer.referralCode;
   await send(customerId,
@@ -1039,19 +1041,44 @@ function getStatusEmoji(s) {
 // DASHBOARD APIs (used by Selly mobile app)
 // ─────────────────────────────────────────────────────────────────────────────
 
-app.get ("/api/orders",        (req, res) => res.json({ stats: orders.getStats(), ...orders.getAll({ status: req.query.status, page: Number(req.query.page) || 1 }) }));
-app.get ("/api/stats",         (req, res) => res.json(orders.getStats()));
-app.get ("/api/customers",     (req, res) => res.json({ stats: customers.getStats(), ...customers.getAll({ tag: req.query.tag, page: Number(req.query.page) || 1 }) }));
-app.get ("/api/customers/stats",(req, res) => res.json(customers.getStats()));
-app.get ("/api/customers/:id", (req, res) => {
-  const c = customers.get(req.params.id);
-  if (!c) return res.status(404).json({ error: "Not found" });
-  res.json({ customer: c, orders: orders.getByCustomer(req.params.id) });
+app.get ("/api/orders",         async (req, res) => {
+  try {
+    const [stats, result] = await Promise.all([
+      orders.getStats(),
+      orders.getAll({ status: req.query.status, page: Number(req.query.page) || 1 }),
+    ]);
+    res.json({ stats, ...result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get ("/api/stats",          async (req, res) => {
+  try { res.json(await orders.getStats()); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get ("/api/customers",      async (req, res) => {
+  try {
+    const [stats, result] = await Promise.all([
+      customers.getStats(),
+      customers.getAll({ tag: req.query.tag, page: Number(req.query.page) || 1 }),
+    ]);
+    res.json({ stats, ...result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get ("/api/customers/stats", async (req, res) => {
+  try { res.json(await customers.getStats()); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get ("/api/customers/:id",   async (req, res) => {
+  try {
+    const [c, cOrders] = await Promise.all([
+      customers.get(req.params.id),
+      orders.getByCustomer(req.params.id),
+    ]);
+    if (!c) return res.status(404).json({ error: "Not found" });
+    res.json({ customer: c, orders: cOrders });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post("/api/orders/:id/status", (req, res) => {
+app.post("/api/orders/:id/status", async (req, res) => {
   const { status: newStatus, trackingNumber, trackingUrl } = req.body;
-  const updated = orders.updateStatus(req.params.id, newStatus, { trackingNumber, trackingUrl });
+  const updated = await orders.updateStatus(req.params.id, newStatus, { trackingNumber, trackingUrl });
   if (!updated) return res.status(404).json({ error: "Order not found" });
 
   const msgs = {
@@ -1066,16 +1093,34 @@ app.post("/api/orders/:id/status", (req, res) => {
 });
 
 // ── Catalog APIs ──────────────────────────────────────────────────────────────
-app.get   ("/api/catalog",        (req, res) => res.json({ products: catalog.getAll() }));
-app.post  ("/api/catalog/add",    (req, res) => res.json({ ok: true, product: catalog.addProduct(req.body) }));
-app.put   ("/api/catalog/:id",    (req, res) => { const p = catalog.update(req.params.id, req.body); p ? res.json({ ok:true,p }) : res.status(404).json({ error:"Not found" }); });
-app.delete("/api/catalog/:id",    (req, res) => { const d = catalog.deleteProduct(req.params.id); d ? res.json({ ok:true }) : res.status(404).json({ error:"Not found" }); });
-app.post  ("/api/catalog/stock",  (req, res) => { const { id, inStock } = req.body; if (!id) return res.status(400).json({ error:"id required" }); const p = catalog.toggleStock(id, inStock); p ? res.json({ ok:true,p }) : res.status(404).json({ error:"Not found" }); });
-app.post  ("/api/catalog/upload", (req, res) => {
+app.get   ("/api/catalog",        async (req, res) => {
+  try { res.json({ products: await catalog.getAll() }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post  ("/api/catalog/add",    async (req, res) => {
+  try { res.json({ ok: true, product: await catalog.addProduct(req.body) }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.put   ("/api/catalog/:id",    async (req, res) => {
   try {
-    const imported = catalog.importCSV(typeof req.body === "string" ? req.body : JSON.stringify(req.body));
-    res.json({ ok: true, imported: imported.length });
-  } catch (err) { res.status(400).json({ error: err.message }); }
+    const p = await catalog.update(req.params.id, req.body);
+    p ? res.json({ ok: true, p }) : res.status(404).json({ error: "Not found" });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete("/api/catalog/:id",    async (req, res) => {
+  try {
+    const d = await catalog.deleteProduct(req.params.id);
+    d ? res.json({ ok: true }) : res.status(404).json({ error: "Not found" });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post  ("/api/catalog/stock",  async (req, res) => {
+  try {
+    const { id, inStock } = req.body;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const p = await catalog.toggleStock(id, inStock);
+    p ? res.json({ ok: true, p }) : res.status(404).json({ error: "Not found" });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post  ("/api/catalog/upload", (req, res) => {
+  res.status(400).json({ error: "CSV upload not supported. Add products via the app." });
 });
 app.post("/api/insta/fetch", async (req, res) => {
   const { url } = req.body;
@@ -1109,8 +1154,8 @@ app.get("/api/loyalty/:id", (req, res) => {
 });
 
 // GET /api/loyalty/leaderboard — top customers by points
-app.get("/api/loyalty/leaderboard", (req, res) => {
-  const allCustomers = customers.getAll().customers || [];
+app.get("/api/loyalty/leaderboard", async (req, res) => {
+  const { customers: allCustomers = [] } = await customers.getAll();
   const leaderboard  = allCustomers.map(c => ({
     ...c,
     loyaltyRecord: loyalty.getRecord(c.id),
@@ -1144,7 +1189,7 @@ app.post("/api/promote/festival", async (req, res) => {
   const message = festivals.getCampaignMessage(festivalName, businessName, discount);
   if (!message) return res.status(400).json({ error: "Unknown festival" });
 
-  const allCustomers = customers.getAll().customers || [];
+  const { customers: allCustomers = [] } = await customers.getAll();
   let sent = 0;
   for (const c of allCustomers) {
     try {
@@ -1163,7 +1208,7 @@ app.post("/api/promote/festival", async (req, res) => {
 app.post("/api/promote/flash", async (req, res) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: "message required" });
-  const allCustomers = customers.getAll().customers || [];
+  const { customers: allCustomers = [] } = await customers.getAll();
   let sent = 0;
   for (const c of allCustomers) {
     try { await wa.send(c.id, message); session.update(c.id, { promoSource: "flash_sale", promoSentAt: Date.now() }); sent++; } catch {}
@@ -1174,7 +1219,7 @@ app.post("/api/promote/flash", async (req, res) => {
 app.post("/api/promote/newarrival", async (req, res) => {
   const { productId } = req.body;
   if (!productId) return res.status(400).json({ error: "productId required" });
-  const product = catalog.get(productId);
+  const product = await catalog.get(productId);
   if (!product) return res.status(404).json({ error: "Product not found" });
   const msg =
     `🆕 *New Arrival!*\n\n✨ *${product.name}*\n` +
@@ -1182,7 +1227,7 @@ app.post("/api/promote/newarrival", async (req, res) => {
     `🎨 ${(product.colors||[]).join(", ")||"—"}\n` +
     `📏 ${(product.sizes||[]).join(", ")||"One size"}\n\n` +
     `Reply with the product name to order! 👇`;
-  const allCustomers = customers.getAll().customers || [];
+  const { customers: allCustomers = [] } = await customers.getAll();
   let sent = 0;
   for (const c of allCustomers) {
     try { await wa.send(c.id, msg); session.update(c.id, { promoSource: "new_arrival", promoSentAt: Date.now() }); sent++; } catch {}
@@ -1223,7 +1268,7 @@ app.post("/test/chat", async (req, res) => {
   wa._testReplies = replies;
 
   try {
-    customers.touch(subscriber_id, { name: first_name, first_name });
+    await customers.touch(subscriber_id, { name: first_name, first_name });
     let sess = session.get(subscriber_id) || session.create(subscriber_id, { name: first_name, first_name });
 
     if (!sess.lang) {
@@ -1299,7 +1344,7 @@ checkFestivalBroadcasts(); // run once on startup
 function scheduleReviewRequest(customerId, orderId, customerName) {
   setTimeout(async () => {
     try {
-      const order = orders.get(orderId);
+      const order = await orders.get(orderId);
       if (!order || order.status !== "delivered") return;
       const lang = session.get(customerId)?.lang || "english";
       const msgs = {
@@ -1374,7 +1419,7 @@ app.post("/webhook/seller", async (req, res) => {
 });
 
 async function saveProduct(businessId, sess) {
-  const product = catalog.addProduct(sess.pendingProduct);
+  const product = await catalog.addProduct(sess.pendingProduct);
   sellerSessions.set(businessId, { step: "idle" });
   await wa.send(businessId,
     `✅ *Product Added!*\n━━━━━━━━━━━━━━━━\n` +
