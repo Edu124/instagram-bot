@@ -253,7 +253,7 @@ function loadDemo() {
   ];
 }
 
-// ── Load persisted catalog on startup (fall back to demo) ─────────────────────
+// ── Load persisted catalog on startup (start empty if no file) ────────────────
 function _loadOrDemo() {
   const filePath = path.join(__dirname, "../data/catalog_default.json");
   try {
@@ -264,8 +264,8 @@ function _loadOrDemo() {
       return;
     }
   } catch {}
-  loadDemo();
-  console.log("[Catalog] Loaded demo catalog (8 products)");
+  products = [];
+  console.log("[Catalog] Starting with empty catalog");
 }
 
 _loadOrDemo();
