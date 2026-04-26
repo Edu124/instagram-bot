@@ -105,6 +105,9 @@ app.post("/webhook/whatsapp", async (req, res) => {
           // Load or create session (preserves language + loyalty across messages)
           let sess = session.get(senderId) || session.create(senderId, { name, first_name, last_name });
 
+          // ── Typing indicator (mark read + show dots for 1.5s) ─────────────
+          await wa.markReadAndType(senderId, msg.id);
+
           // ── Voice message → transcription ─────────────────────────────────
           if (msgType === "audio") {
             console.log(`[WhatsApp] Voice note from ${senderId}`);
@@ -321,6 +324,8 @@ async function handleStatusProductResponse(customerId, sess, message) {
 // ─────────────────────────────────────────────────────────────────────────────
 // FEATURE: Product Search (with Bargaining hook)
 // ─────────────────────────────────────────────────────────────────────────────
+const GREETINGS = /^(hi+|hello+|hey+|helo|namaste|namaskar|hii+|sup|yo|ola|hola|good\s*(morning|afternoon|evening|night)|start|menu|shop|catalog)$/i;
+
 async function handleSearch(customerId, sess, message, name) {
   const lang = sess.lang || "english";
 
@@ -328,6 +333,16 @@ async function handleSearch(customerId, sess, message, name) {
   if (bargain.isBargaining(message) && sess.cart?.length) {
     const item = sess.cart[sess.cart.length - 1];
     return handleBargain(customerId, sess, item, message);
+  }
+
+  // Greeting → always show welcome, skip AI search
+  if (GREETINGS.test(message.trim())) {
+    const greets = {
+      hindi   : `नमस्ते ${name}! 👋\n\nमैं Selly हूं — आपका WhatsApp shopping assistant! 🛍️\n\nआप क्या ढूंढ रहे हैं? बताइए!\nउदाहरण: "नीली जींस ₹800 में" या "कुर्ती size M"`,
+      hinglish: `Hey ${name}! 👋 Main Selly hoon — aapka WhatsApp shopping assistant! 🛍️\n\nKya dhundh rahe ho? Bolo!\nExample: "blue jeans under 800" ya "kurti size M"`,
+      english : `Hi ${name}! 👋 I'm Selly — your WhatsApp shopping assistant! 🛍️\n\nWhat are you looking for?\nExample: "silk saree" or "floral saree size M"`,
+    };
+    return send(customerId, greets[lang] || greets.english);
   }
 
   const intent = await ai.extractSearchIntent(message);

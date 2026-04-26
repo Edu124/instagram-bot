@@ -50,6 +50,30 @@ async function sendInvoice(to, pdfBuffer, filename) {
   return send(to, `🧾 *Invoice Generated*\nInvoice No: ${filename}\nThank you for your order!`);
 }
 
+// ── Mark message as read + show typing indicator ──────────────────────────────
+async function markReadAndType(to, messageId) {
+  if (!WA_TOKEN || !PHONE_ID) return;
+
+  // Mark as read (shows blue ticks)
+  await apiPost(`/${PHONE_ID}/messages`, JSON.stringify({
+    messaging_product: "whatsapp",
+    status           : "read",
+    message_id       : messageId,
+  })).catch(() => {});
+
+  // Show typing dots
+  await apiPost(`/${PHONE_ID}/messages`, JSON.stringify({
+    messaging_product: "whatsapp",
+    recipient_type   : "individual",
+    to,
+    type             : "text",
+    "typing"         : { status: "on" },
+  })).catch(() => {});
+
+  // Hold typing for 1.5 seconds
+  await new Promise(r => setTimeout(r, 1500));
+}
+
 // ── Internal API call ─────────────────────────────────────────────────────────
 function apiPost(path, bodyStr) {
   return new Promise((resolve, reject) => {
@@ -89,4 +113,4 @@ function apiPost(path, bodyStr) {
 
 function sanitize(text) { return text.slice(0, 4096); }
 
-module.exports = { send, sendProductCards, sendQuickReplies, sendInvoice };
+module.exports = { send, sendProductCards, sendQuickReplies, sendInvoice, markReadAndType };
