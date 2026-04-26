@@ -24,7 +24,7 @@ async function addProduct(product, businessId = DEFAULT_BID) {
   };
 
   const { data, error } = await supabase.from("catalog").insert(row).select().single();
-  if (error) { console.error("[Catalog] addProduct error:", error.message); return row; }
+  if (error) { console.error("[Catalog] addProduct error:", error.message); return _toProduct(row); }
   return _toProduct(data);
 }
 
