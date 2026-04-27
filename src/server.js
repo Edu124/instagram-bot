@@ -1654,7 +1654,7 @@ app.post("/api/settings", async (req, res) => {
 // ADMIN APIs — protected by ADMIN_SECRET env var
 // Only callable from the Selly admin account (codeforeai.app@gmail.com)
 // ─────────────────────────────────────────────────────────────────────────────
-const ADMIN_SECRET = process.env.ADMIN_SECRET || "selly_admin_2024";
+const ADMIN_SECRET = "selly_admin_2024";
 
 function isAdmin(req) {
   return req.headers["x-admin-token"] === ADMIN_SECRET;
