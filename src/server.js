@@ -2018,7 +2018,7 @@ process.on("SIGTERM", () => {
 // ── Start server ──────────────────────────────────────────────────────────────
 setup()
   .then(() => {
-    app.listen(PORT, () => {
+    app.listen(PORT, "0.0.0.0", () => {
       console.log(`[Selly Bot] Running on port ${PORT} 🚀`);
       console.log(`[Selly Bot] Features: multi-language · status-reply · loyalty · bargaining · festivals · COD+Razorpay`);
     });
