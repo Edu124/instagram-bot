@@ -1,5 +1,6 @@
 // ── Shiprocket + Delhivery Tracking ───────────────────────────────────────────
-const axios = require("axios");
+// Uses Node 18+ built-in fetch — no extra dependencies needed
+// ─────────────────────────────────────────────────────────────────────────────
 
 let _srToken       = null;
 let _srTokenExpiry = 0;
@@ -8,13 +9,16 @@ let _srTokenExpiry = 0;
 async function getShiprocketToken(email, password) {
   if (_srToken && Date.now() < _srTokenExpiry) return _srToken;
   try {
-    const r = await axios.post(
-      "https://apiv2.shiprocket.in/v1/external/auth/login",
-      { email, password },
-      { timeout: 10000 }
-    );
-    _srToken        = r.data.token;
-    _srTokenExpiry  = Date.now() + 23 * 60 * 60 * 1000; // 23h
+    const res = await fetch("https://apiv2.shiprocket.in/v1/external/auth/login", {
+      method : "POST",
+      headers: { "Content-Type": "application/json" },
+      body   : JSON.stringify({ email, password }),
+      signal : AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const data  = await res.json();
+    _srToken       = data.token;
+    _srTokenExpiry = Date.now() + 23 * 60 * 60 * 1000; // 23h
     return _srToken;
   } catch (e) {
     console.error("[Tracking] Shiprocket login error:", e.message);
@@ -27,11 +31,16 @@ async function trackShiprocket(awb, email, password) {
   const token = await getShiprocketToken(email, password);
   if (!token) return null;
   try {
-    const r = await axios.get(
+    const res = await fetch(
       `https://apiv2.shiprocket.in/v1/external/courier/track/awb/${awb}`,
-      { headers: { Authorization: `Bearer ${token}` }, timeout: 10000 }
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        signal : AbortSignal.timeout(10000),
+      }
     );
-    const td = r.data?.tracking_data;
+    if (!res.ok) return null;
+    const r  = await res.json();
+    const td = r?.tracking_data;
     if (!td) return null;
     const track = td.shipment_track?.[0] || {};
     return {
@@ -56,22 +65,27 @@ async function trackShiprocket(awb, email, password) {
 async function trackDelhivery(awb, apiKey) {
   if (!apiKey) return null;
   try {
-    const r = await axios.get(
+    const res = await fetch(
       `https://track.delhivery.com/api/v1/packages/json/?waybill=${awb}`,
-      { headers: { Authorization: `Token ${apiKey}` }, timeout: 10000 }
+      {
+        headers: { Authorization: `Token ${apiKey}` },
+        signal : AbortSignal.timeout(10000),
+      }
     );
-    const pkg = r.data?.ShipmentData?.[0]?.Shipment;
+    if (!res.ok) return null;
+    const r   = await res.json();
+    const pkg = r?.ShipmentData?.[0]?.Shipment;
     if (!pkg) return null;
     return {
       awb,
       carrier      : "Delhivery",
-      status       : pkg.Status?.Status || "unknown",
+      status       : pkg.Status?.Status    || "unknown",
       statusText   : pkg.Status?.StatusType || pkg.Status?.Status || "",
       estimatedDate: pkg.ExpectedDeliveryDate || "",
       events       : (pkg.Scans || []).slice(0, 6).map(e => ({
-        status  : e.ScanDetail?.Scan           || "",
+        status  : e.ScanDetail?.Scan            || "",
         location: e.ScanDetail?.ScannedLocation || "",
-        date    : e.ScanDetail?.ScanDateTime   || "",
+        date    : e.ScanDetail?.ScanDateTime    || "",
       })),
     };
   } catch (e) {
@@ -85,18 +99,17 @@ async function track(awb, carrier, credentials = {}) {
   if (!awb) return null;
   const c = (carrier || "").toLowerCase();
   if (c === "delhivery") return trackDelhivery(awb, credentials.delhiveryApiKey);
-  // Default: try Shiprocket
   return trackShiprocket(awb, credentials.shiprocketEmail, credentials.shiprocketPassword);
 }
 
-// ── Convert tracking status to Selly order status ────────────────────────────
+// ── Map carrier status → Selly order status ───────────────────────────────────
 function mapStatus(carrierStatus = "") {
   const s = carrierStatus.toLowerCase();
-  if (s.includes("deliver")) return "delivered";
-  if (s.includes("out for") || s.includes("out_for")) return "out_for_delivery";
-  if (s.includes("transit") || s.includes("shipped") || s.includes("dispatch")) return "shipped";
-  if (s.includes("picked") || s.includes("packed")) return "packed";
-  return null; // no mapping
+  if (s.includes("deliver"))                             return "delivered";
+  if (s.includes("out for") || s.includes("out_for"))   return "out_for_delivery";
+  if (s.includes("transit") || s.includes("dispatch") || s.includes("ship")) return "shipped";
+  if (s.includes("picked") || s.includes("packed"))     return "packed";
+  return null;
 }
 
 module.exports = { track, trackShiprocket, trackDelhivery, mapStatus };
