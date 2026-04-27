@@ -664,12 +664,17 @@ async function handlePaymentChoice(customerId, sess, message) {
 async function placeOrder(customerId, sess, paymentMode) {
   const lang = sess.lang || "english";
 
+  const bizSettings = await getSettings(DEFAULT_BUSINESS_ID);
   const bill = billing.generate({
-    cart    : sess.cart,
-    address : sess.address,
-    mobile  : sess.mobile,
-    name    : sess.name,
-    extra   : paymentMode === "cod" ? 30 : 0, // COD fee
+    cart            : sess.cart,
+    address         : sess.address,
+    mobile          : sess.mobile,
+    name            : sess.name,
+    businessName    : bizSettings.business_name,
+    businessGST     : bizSettings.business_gst_no,
+    businessAddress : bizSettings.business_address,
+    extra           : paymentMode === "cod" ? (bizSettings.cod_fee ?? 30) : 0,
+    settings        : bizSettings,
   });
 
   // Apply loyalty discount if any
@@ -784,12 +789,20 @@ async function confirmOrder(customerId, order, isOnline = true) {
   const totalAwarded  = pointsAdded + bonusPoints;
   const loyaltyRecord = await loyalty.getRecord(customerId);
   const tier          = loyalty.getTier(loyaltyRecord.totalEarned);
+  const customer      = await customers.get(customerId);
+  const referralCode  = customer?.referralCode || "";
 
   session.reset(customerId);
 
   const codNote  = order.paymentMode === "cod"
     ? { hindi: "💵 Cash on delivery — delivery ke time payment karein.", hinglish: "💵 Cash on delivery — delivery ke time pay karna.", english: "💵 Pay cash on delivery when your order arrives." }
     : { hindi: "", hinglish: "", english: "" };
+
+  const refLine = referralCode ? {
+    hindi   : `\n🎟️ *Aapka Referral Code: ${referralCode}*\nFriends ko share karo — har order pe 5% earn karo!`,
+    hinglish: `\n🎟️ *Your Referral Code: ${referralCode}*\nFriends ko share karo — unke har order pe 5% kamao!`,
+    english : `\n🎟️ *Your Referral Code: ${referralCode}*\nShare with friends — earn 5% on every order they place!`,
+  } : { hindi: "", hinglish: "", english: "" };
 
   const msgs = {
     hindi:
@@ -801,7 +814,8 @@ async function confirmOrder(customerId, order, isOnline = true) {
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
       `🚚 Tracking updates यहाँ आएंगे।\n` +
-      `"track order" reply करें status check करने के लिए।`,
+      `"track order" reply करें status check करने के लिए।` +
+      refLine.hindi,
 
     hinglish:
       `✅ *Order Confirm ho gaya!* 🎉\n\n` +
@@ -812,7 +826,8 @@ async function confirmOrder(customerId, order, isOnline = true) {
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
       `🚚 Tracking updates yahan aayenge.\n` +
-      `"track order" reply karo status check karne ke liye.`,
+      `"track order" reply karo status check karne ke liye.` +
+      refLine.hinglish,
 
     english:
       `✅ *Order Confirmed!* 🎉\n\n` +
@@ -823,7 +838,8 @@ async function confirmOrder(customerId, order, isOnline = true) {
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
       `🚚 You'll get tracking updates here.\n` +
-      `Reply "track order" anytime to check status.`,
+      `Reply "track order" anytime to check status.` +
+      refLine.english,
   };
 
   await send(customerId, msgs[lang] || msgs.english);
@@ -1210,31 +1226,53 @@ app.post("/api/promote/festival", async (req, res) => {
 
 // ── Existing promotion APIs ────────────────────────────────────────────────────
 app.post("/api/promote/flash", async (req, res) => {
-  const { message } = req.body;
+  const { message, productIds = [] } = req.body;
   if (!message) return res.status(400).json({ error: "message required" });
+
+  // Build product list block if products were selected
+  let productBlock = "";
+  if (productIds.length > 0) {
+    const prods = await Promise.all(productIds.map(id => catalog.get(id)));
+    const lines  = prods.filter(Boolean).map(p =>
+      `• *${p.name}* — ₹${p.price > 0 ? p.price.toLocaleString("en-IN") : "Contact"}` +
+      (p.sizes?.length ? ` | Sizes: ${p.sizes.join(", ")}` : "") +
+      (p.colors?.length ? ` | ${p.colors.join(", ")}` : "")
+    );
+    if (lines.length) productBlock = `\n\n🛍️ *Products on Sale:*\n${lines.join("\n")}`;
+  }
+
+  const fullMsg = message + productBlock + "\n\nReply with a product name to order! 👇";
   const { customers: allCustomers = [] } = await customers.getAll();
   let sent = 0;
   for (const c of allCustomers) {
-    try { await wa.send(c.id, message); session.update(c.id, { promoSource: "flash_sale", promoSentAt: Date.now() }); sent++; } catch {}
+    try { await wa.send(c.id, fullMsg); session.update(c.id, { promoSource: "flash_sale", promoSentAt: Date.now() }); sent++; } catch {}
   }
   res.json({ ok: true, sent, total: allCustomers.length });
 });
 
 app.post("/api/promote/newarrival", async (req, res) => {
-  const { productId } = req.body;
-  if (!productId) return res.status(400).json({ error: "productId required" });
-  const product = await catalog.get(productId);
-  if (!product) return res.status(404).json({ error: "Product not found" });
-  const msg =
-    `🆕 *New Arrival!*\n\n✨ *${product.name}*\n` +
-    `💰 ${product.price > 0 ? `₹${product.price}` : "Contact"}\n` +
-    `🎨 ${(product.colors||[]).join(", ")||"—"}\n` +
-    `📏 ${(product.sizes||[]).join(", ")||"One size"}\n\n` +
-    `Reply with the product name to order! 👇`;
+  const { productIds = [], message } = req.body;
+  if (!productIds.length) return res.status(400).json({ error: "productIds required" });
+
+  const prods = await Promise.all(productIds.map(id => catalog.get(id)));
+  const valid  = prods.filter(Boolean);
+  if (!valid.length) return res.status(404).json({ error: "No valid products found" });
+
+  const productLines = valid.map(p =>
+    `✨ *${p.name}*\n` +
+    `   💰 ${p.price > 0 ? `₹${p.price.toLocaleString("en-IN")}` : "Contact for price"}\n` +
+    (p.sizes?.length  ? `   📏 ${p.sizes.join(", ")}\n`  : "") +
+    (p.colors?.length ? `   🎨 ${p.colors.join(", ")}\n` : "") +
+    (p.description    ? `   ${p.description.slice(0, 60)}${p.description.length > 60 ? "…" : ""}\n` : "")
+  ).join("\n");
+
+  const header = message || "🆕 *New Arrivals are here!* Check out what's fresh 👇";
+  const fullMsg = `${header}\n\n${productLines}\nReply with a product name to order!`;
+
   const { customers: allCustomers = [] } = await customers.getAll();
   let sent = 0;
   for (const c of allCustomers) {
-    try { await wa.send(c.id, msg); session.update(c.id, { promoSource: "new_arrival", promoSentAt: Date.now() }); sent++; } catch {}
+    try { await wa.send(c.id, fullMsg); session.update(c.id, { promoSource: "new_arrival", promoSentAt: Date.now() }); sent++; } catch {}
   }
   res.json({ ok: true, sent });
 });
@@ -1242,6 +1280,66 @@ app.post("/api/promote/newarrival", async (req, res) => {
 app.post("/api/promote/abandoned", async (req, res) => {
   const recovered = await runAbandonedCartRecovery();
   res.json({ ok: true, sent: recovered });
+});
+
+// ── Business Settings ─────────────────────────────────────────────────────────
+// In-memory cache so every order doesn't hit the DB
+const db = require("./db");
+const _settingsCache = {};
+
+async function getSettings(businessId = DEFAULT_BUSINESS_ID) {
+  if (_settingsCache[businessId]) return _settingsCache[businessId];
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM business_settings WHERE business_id = $1`,
+      [businessId]
+    );
+    if (rows[0]) { _settingsCache[businessId] = rows[0]; return rows[0]; }
+  } catch {}
+  return {}; // fallback to billing.js defaults
+}
+
+app.get("/api/settings", async (req, res) => {
+  const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
+  const s   = await getSettings(bid);
+  res.json({ settings: s });
+});
+
+app.post("/api/settings", async (req, res) => {
+  const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
+  const {
+    business_name, business_gst_no, business_address,
+    gst_enabled, gst_rate, delivery_charge, free_above, cod_fee,
+  } = req.body;
+
+  const fields = [];
+  const vals   = [];
+  let i = 1;
+  if (business_name     !== undefined) { fields.push(`business_name=$${i++}`);    vals.push(business_name); }
+  if (business_gst_no   !== undefined) { fields.push(`business_gst_no=$${i++}`);  vals.push(business_gst_no); }
+  if (business_address  !== undefined) { fields.push(`business_address=$${i++}`); vals.push(business_address); }
+  if (gst_enabled       !== undefined) { fields.push(`gst_enabled=$${i++}`);      vals.push(gst_enabled); }
+  if (gst_rate          !== undefined) { fields.push(`gst_rate=$${i++}`);         vals.push(Number(gst_rate)); }
+  if (delivery_charge   !== undefined) { fields.push(`delivery_charge=$${i++}`);  vals.push(Number(delivery_charge)); }
+  if (free_above        !== undefined) { fields.push(`free_above=$${i++}`);       vals.push(Number(free_above)); }
+  if (cod_fee           !== undefined) { fields.push(`cod_fee=$${i++}`);          vals.push(Number(cod_fee)); }
+
+  if (!fields.length) return res.status(400).json({ error: "No fields to update" });
+  fields.push(`updated_at=NOW()`);
+  vals.push(bid);
+
+  try {
+    await db.query(
+      `INSERT INTO business_settings (business_id) VALUES ($${i})
+       ON CONFLICT (business_id) DO UPDATE SET ${fields.join(", ")}`,
+      vals
+    );
+    delete _settingsCache[bid]; // invalidate cache
+    const s = await getSettings(bid);
+    res.json({ ok: true, settings: s });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── Billing & Subscription APIs ───────────────────────────────────────────────

@@ -146,6 +146,22 @@ async function setup() {
   `);
   await db.query(`CREATE INDEX IF NOT EXISTS status_logs_posted_idx ON status_logs(posted_at)`);
 
+  // ── business_settings ─────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS business_settings (
+      business_id       TEXT PRIMARY KEY,
+      business_name     TEXT NOT NULL DEFAULT 'My Store',
+      business_gst_no   TEXT NOT NULL DEFAULT '',
+      business_address  TEXT NOT NULL DEFAULT '',
+      gst_enabled       BOOLEAN NOT NULL DEFAULT true,
+      gst_rate          NUMERIC NOT NULL DEFAULT 5,
+      delivery_charge   NUMERIC NOT NULL DEFAULT 49,
+      free_above        NUMERIC NOT NULL DEFAULT 999,
+      cod_fee           NUMERIC NOT NULL DEFAULT 30,
+      updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
   console.log("[Setup] All tables ready ✓");
 }
 

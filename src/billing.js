@@ -2,26 +2,34 @@
 // Generates GST-compliant invoices — works offline (no server needed)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const DELIVERY_CHARGE = 49;
-const GST_RATE        = 5; // 5% GST for clothing
+const DEFAULTS = {
+  deliveryCharge : 49,
+  gstRate        : 5,
+  freeAbove      : 999,
+  codFee         : 30,
+};
 
 // ── Generate bill object ──────────────────────────────────────────────────────
-function generate({ cart, address, mobile, name, businessGST, businessName, businessAddress, extra = 0 }) {
+function generate({ cart, address, mobile, name, businessGST, businessName, businessAddress,
+                    extra = 0, settings = {} }) {
+  const deliveryCharge = settings.delivery_charge ?? DEFAULTS.deliveryCharge;
+  const gstRate        = settings.gst_enabled !== false ? (settings.gst_rate ?? DEFAULTS.gstRate) : 0;
+  const freeAbove      = settings.free_above   ?? DEFAULTS.freeAbove;
+
   const items = cart.map(item => ({
-    id      : item.id,
-    name    : item.name,
-    size    : item.selectedSize || null,
-    price   : item.bargained ? item.price : item.price, // bargained price already applied
-    qty     : item.qty || 1,
-    total   : item.price * (item.qty || 1),
-    bargained: item.bargained || false,
+    id        : item.id,
+    name      : item.name,
+    size      : item.selectedSize || null,
+    price     : item.price,
+    qty       : item.qty || 1,
+    total     : item.price * (item.qty || 1),
+    bargained : item.bargained || false,
   }));
 
   const subtotal  = items.reduce((sum, i) => sum + i.total, 0);
-  const delivery  = subtotal >= 999 ? 0 : DELIVERY_CHARGE; // Free delivery above ₹999
-  const gstBase   = subtotal;
-  const gst       = Math.round(gstBase * GST_RATE / 100);
-  const total     = subtotal + delivery + gst + extra; // extra = COD charge (30)
+  const delivery  = subtotal >= freeAbove ? 0 : deliveryCharge;
+  const gst       = Math.round(subtotal * gstRate / 100);
+  const total     = subtotal + delivery + gst + extra;
   const invoiceNo = `SL${Date.now().toString().slice(-8)}`;
 
   return {
@@ -38,7 +46,7 @@ function generate({ cart, address, mobile, name, businessGST, businessName, busi
     items,
     subtotal,
     delivery,
-    gstRate        : GST_RATE,
+    gstRate        : gstRate,
     gst,
     total,
     paymentStatus  : "pending",
