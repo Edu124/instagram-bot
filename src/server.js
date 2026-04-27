@@ -1650,6 +1650,86 @@ app.post("/api/settings", async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN APIs — protected by ADMIN_SECRET env var
+// Only callable from the Selly admin account (codeforeai.app@gmail.com)
+// ─────────────────────────────────────────────────────────────────────────────
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "selly_admin_2024";
+
+function isAdmin(req) {
+  return req.headers["x-admin-token"] === ADMIN_SECRET;
+}
+
+// GET /api/admin/clients — list all subscriptions + days remaining
+app.get("/api/admin/clients", async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: "Forbidden" });
+  try {
+    const allSubs = await subscriptions.getAll();
+    const now     = Date.now();
+    const clients = allSubs.map(s => ({
+      businessId  : s.businessId,
+      status      : s.status,
+      plan        : s.plan,
+      monthlyFee  : s.monthlyFee,
+      daysRemaining: s.status === "trial"
+        ? Math.max(0, Math.ceil((s.trialEnds - now) / 86400000))
+        : Math.max(0, Math.ceil((s.paidUntil - now) / 86400000)),
+      trialStarted: s.trialStarted,
+      trialEnds   : s.trialEnds,
+      paidUntil   : s.paidUntil,
+      createdAt   : s.createdAt,
+    }));
+    res.json({ clients });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/admin/clients/:businessId/activate — trial → active (30 days)
+app.post("/api/admin/clients/:businessId/activate", async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: "Forbidden" });
+  try {
+    const { businessId } = req.params;
+    const now        = Date.now();
+    const paidUntil  = now + 30 * 86400000;
+    await db.query(
+      `INSERT INTO subscriptions (business_id, status, plan, monthly_fee, trial_started, trial_ends,
+         current_period_start, current_period_end, paid_until, created_at, updated_at, payment_history)
+       VALUES ($1,'active','starter',3000,$2,$3,$4,$5,$6,$7,$8,'[]')
+       ON CONFLICT (business_id) DO UPDATE
+         SET status='active', paid_until=$6, updated_at=$8`,
+      [businessId, now, now + 14*86400000, now, paidUntil, paidUntil, now, now]
+    );
+    const sub = await subscriptions.get(businessId);
+    res.json({ ok: true, subscription: sub });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/admin/clients/:businessId/extend — add 30 days
+app.post("/api/admin/clients/:businessId/extend", async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: "Forbidden" });
+  try {
+    const { businessId } = req.params;
+    const sub       = await subscriptions.getOrCreate(businessId);
+    const now       = Date.now();
+    const base      = Math.max(sub.paidUntil || 0, now);
+    const newExpiry = base + 30 * 86400000;
+    await db.query(
+      `UPDATE subscriptions SET status='active', paid_until=$1, updated_at=$2 WHERE business_id=$3`,
+      [newExpiry, now, businessId]
+    );
+    const updated = await subscriptions.get(businessId);
+    res.json({ ok: true, subscription: updated });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/admin/clients/:businessId/expire — cut off access
+app.post("/api/admin/clients/:businessId/expire", async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: "Forbidden" });
+  try {
+    await subscriptions.expire(req.params.businessId);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Billing & Subscription APIs ───────────────────────────────────────────────
 // bid helper — reads from header (X-Business-ID), query param (bid), or falls back to default
 function getBid(req) {
