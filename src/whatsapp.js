@@ -1,18 +1,21 @@
 // ── WhatsApp Cloud API Sender ──────────────────────────────────────────────────
+// All functions accept optional phoneId + token to support multi-tenant routing.
+// Falls back to env vars (single-tenant / dev mode) if not provided.
+// ─────────────────────────────────────────────────────────────────────────────
 const https = require("https");
 
 const WA_TOKEN   = process.env.WHATSAPP_TOKEN    || "";
 const PHONE_ID   = process.env.WHATSAPP_PHONE_ID || "";
 
 // ── Send a text message ───────────────────────────────────────────────────────
-async function send(to, text) {
+async function send(to, text, phoneId = PHONE_ID, token = WA_TOKEN) {
   // Test mode — capture replies instead of actually sending
   if (module.exports._testMode && module.exports._testReplies) {
     module.exports._testReplies.push(text);
     return;
   }
 
-  if (!WA_TOKEN || !PHONE_ID) {
+  if (!token || !phoneId) {
     console.log(`[WhatsApp MOCK] → ${to}: ${text.slice(0, 80)}`);
     return;
   }
@@ -24,11 +27,11 @@ async function send(to, text) {
     text: { body: sanitize(text) },
   });
 
-  return apiPost(`/${PHONE_ID}/messages`, body);
+  return apiPost(`/${phoneId}/messages`, body, token);
 }
 
 // ── Send product list as text ─────────────────────────────────────────────────
-async function sendProductCards(to, products) {
+async function sendProductCards(to, products, phoneId = PHONE_ID, token = WA_TOKEN) {
   const text = products.slice(0, 10).map((p, i) => {
     const priceStr = p.price > 0 ? `₹${p.price}` : "Contact";
     const sizeStr  = p.sizes?.length ? `\n   Sizes: ${p.sizes.slice(0, 4).join(", ")}` : "";
@@ -36,53 +39,53 @@ async function sendProductCards(to, products) {
     return `${i + 1}. *${p.name}* — ${priceStr}${sizeStr}${colorStr}`;
   }).join("\n\n");
 
-  return send(to, `📦 *Our Products:*\n\n${text}\n\nReply with the number to order.`);
+  return send(to, `📦 *Our Products:*\n\n${text}\n\nReply with the number to order.`, phoneId, token);
 }
 
 // ── Send quick replies as numbered list ───────────────────────────────────────
-async function sendQuickReplies(to, text, replies) {
+async function sendQuickReplies(to, text, replies, phoneId = PHONE_ID, token = WA_TOKEN) {
   const replyText = `${text}\n\n${replies.map((r, i) => `${i + 1}. ${r}`).join("\n")}`;
-  return send(to, replyText);
+  return send(to, replyText, phoneId, token);
 }
 
 // ── Send invoice notification ─────────────────────────────────────────────────
-async function sendInvoice(to, pdfBuffer, filename) {
-  return send(to, `🧾 *Invoice Generated*\nInvoice No: ${filename}\nThank you for your order!`);
+async function sendInvoice(to, pdfBuffer, filename, phoneId = PHONE_ID, token = WA_TOKEN) {
+  return send(to, `🧾 *Invoice Generated*\nInvoice No: ${filename}\nThank you for your order!`, phoneId, token);
 }
 
 // ── Mark message as read + show typing indicator ──────────────────────────────
-async function markReadAndType(to, messageId) {
-  if (!WA_TOKEN || !PHONE_ID) return;
+async function markReadAndType(to, messageId, phoneId = PHONE_ID, token = WA_TOKEN) {
+  if (!token || !phoneId) return;
 
   // Mark as read (shows blue ticks)
-  await apiPost(`/${PHONE_ID}/messages`, JSON.stringify({
+  await apiPost(`/${phoneId}/messages`, JSON.stringify({
     messaging_product: "whatsapp",
     status           : "read",
     message_id       : messageId,
-  })).catch(() => {});
+  }), token).catch(() => {});
 
   // Show typing dots
-  await apiPost(`/${PHONE_ID}/messages`, JSON.stringify({
+  await apiPost(`/${phoneId}/messages`, JSON.stringify({
     messaging_product: "whatsapp",
     recipient_type   : "individual",
     to,
     type             : "text",
     "typing"         : { status: "on" },
-  })).catch(() => {});
+  }), token).catch(() => {});
 
   // Hold typing for 1.5 seconds
   await new Promise(r => setTimeout(r, 1500));
 }
 
 // ── Internal API call ─────────────────────────────────────────────────────────
-function apiPost(path, bodyStr) {
+function apiPost(path, bodyStr, token = WA_TOKEN) {
   return new Promise((resolve, reject) => {
     const options = {
       hostname: "graph.facebook.com",
       path    : `/v21.0${path}`,
       method  : "POST",
       headers : {
-        "Authorization" : `Bearer ${WA_TOKEN}`,
+        "Authorization" : `Bearer ${token}`,
         "Content-Type"  : "application/json",
         "Content-Length": Buffer.byteLength(bodyStr),
       },

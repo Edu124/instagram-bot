@@ -34,12 +34,18 @@ const wishlistMod  = require("./wishlist");
 const otpMod       = require("./otp");
 const photoInquiry = require("./photo_inquiry");
 const trackingMod  = require("./tracking");
+const waNumbers    = require("./wa_numbers");  // multi-tenant phone routing
 
 // ── Unified send helper ───────────────────────────────────────────────────────
-// All bot replies MUST go through here — easy to swap channel in future
-async function send(to, text)                 { return wa.send(to, text); }
-async function sendCards(to, products)        { return wa.sendProductCards(to, products); }
-async function sendReplies(to, text, replies) { return wa.sendQuickReplies(to, text, replies); }
+// Reads per-client phoneId + token from session (set during webhook routing).
+// Falls back to env vars for dev/single-tenant mode.
+function _waCtx(to) {
+  const s = session.get(to);
+  return { phoneId: s?.phoneId || "", token: s?.waToken || "" };
+}
+async function send(to, text)                 { const c = _waCtx(to); return wa.send(to, text, c.phoneId, c.token); }
+async function sendCards(to, products)        { const c = _waCtx(to); return wa.sendProductCards(to, products, c.phoneId, c.token); }
+async function sendReplies(to, text, replies) { const c = _waCtx(to); return wa.sendQuickReplies(to, text, replies, c.phoneId, c.token); }
 
 const DEFAULT_BUSINESS_ID = process.env.BUSINESS_ID || "default";
 
@@ -100,6 +106,19 @@ app.post("/webhook/whatsapp", async (req, res) => {
         const value    = change.value;
         const messages = value?.messages || [];
 
+        // ── Resolve which client (business) owns this phone number ────────
+        const incomingPhoneId = value.metadata?.phone_number_id || "";
+        let   routedBusinessId = DEFAULT_BUSINESS_ID;
+        let   routedToken      = "";
+        if (incomingPhoneId) {
+          const numInfo = await waNumbers.getByPhoneNumberId(incomingPhoneId).catch(() => null);
+          if (numInfo) {
+            routedBusinessId = numInfo.business_id;
+            routedToken      = numInfo.token || "";
+            console.log(`[Routing] phone_number_id=${incomingPhoneId} → business=${routedBusinessId}`);
+          }
+        }
+
         for (const msg of messages) {
           const senderId = msg.from;
           if (!senderId) continue;
@@ -112,8 +131,16 @@ app.post("/webhook/whatsapp", async (req, res) => {
           // Load or create session (preserves language + loyalty across messages)
           let sess = session.get(senderId) || session.create(senderId, { name, first_name, last_name });
 
+          // ── Stamp routing info onto session so send() uses the right number
+          session.update(senderId, {
+            businessId  : routedBusinessId,
+            phoneId     : incomingPhoneId,
+            waToken     : routedToken,
+          });
+          sess = session.get(senderId);
+
           // ── Typing indicator (mark read + show dots for 1.5s) ─────────────
-          await wa.markReadAndType(senderId, msg.id);
+          await wa.markReadAndType(senderId, msg.id, incomingPhoneId, routedToken);
 
           // ── Voice message → transcription ─────────────────────────────────
           if (msgType === "audio") {
@@ -1660,25 +1687,35 @@ function isAdmin(req) {
   return req.headers["x-admin-token"] === ADMIN_SECRET;
 }
 
-// GET /api/admin/clients — list all subscriptions + days remaining
+// GET /api/admin/clients — list all subscriptions + days remaining + registered number
 app.get("/api/admin/clients", async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: "Forbidden" });
   try {
-    const allSubs = await subscriptions.getAll();
+    const allSubs   = await subscriptions.getAll();
+    const allNums   = await waNumbers.getAll();
+    const numsByBid = {};
+    for (const n of allNums) numsByBid[n.business_id] = n;
     const now     = Date.now();
-    const clients = allSubs.map(s => ({
-      businessId  : s.businessId,
-      status      : s.status,
-      plan        : s.plan,
-      monthlyFee  : s.monthlyFee,
-      daysRemaining: s.status === "trial"
-        ? Math.max(0, Math.ceil((s.trialEnds - now) / 86400000))
-        : Math.max(0, Math.ceil((s.paidUntil - now) / 86400000)),
-      trialStarted: s.trialStarted,
-      trialEnds   : s.trialEnds,
-      paidUntil   : s.paidUntil,
-      createdAt   : s.createdAt,
-    }));
+    const clients = allSubs.map(s => {
+      const num = numsByBid[s.businessId];
+      return {
+        businessId   : s.businessId,
+        status       : s.status,
+        plan         : s.plan,
+        monthlyFee   : s.monthlyFee,
+        daysRemaining: s.status === "trial"
+          ? Math.max(0, Math.ceil((s.trialEnds - now) / 86400000))
+          : Math.max(0, Math.ceil((s.paidUntil - now) / 86400000)),
+        trialStarted : s.trialStarted,
+        trialEnds    : s.trialEnds,
+        paidUntil    : s.paidUntil,
+        createdAt    : s.createdAt,
+        // WhatsApp number info
+        phoneNumber    : num?.phone_number    || null,
+        phoneNumberId  : num?.phone_number_id || null,
+        botActive      : num?.active          || false,
+      };
+    });
     res.json({ clients });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1726,6 +1763,37 @@ app.post("/api/admin/clients/:businessId/expire", async (req, res) => {
   if (!isAdmin(req)) return res.status(403).json({ error: "Forbidden" });
   try {
     await subscriptions.expire(req.params.businessId);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Admin: WhatsApp Number Management ────────────────────────────────────────
+// GET /api/admin/numbers — list all registered numbers
+app.get("/api/admin/numbers", async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: "Forbidden" });
+  try {
+    const numbers = await waNumbers.getAll();
+    res.json({ numbers });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/admin/numbers/register — link phone_number_id → business_id
+// Body: { businessId, phoneNumberId, phoneNumber, token }
+app.post("/api/admin/numbers/register", async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: "Forbidden" });
+  try {
+    const { businessId, phoneNumberId, phoneNumber = "", token = "" } = req.body;
+    if (!businessId || !phoneNumberId) return res.status(400).json({ error: "businessId and phoneNumberId required" });
+    await waNumbers.register(businessId, phoneNumberId, phoneNumber, token);
+    res.json({ ok: true, businessId, phoneNumberId });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE /api/admin/numbers/:phoneNumberId — deactivate a number
+app.delete("/api/admin/numbers/:phoneNumberId", async (req, res) => {
+  if (!isAdmin(req)) return res.status(403).json({ error: "Forbidden" });
+  try {
+    await waNumbers.deactivate(req.params.phoneNumberId);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

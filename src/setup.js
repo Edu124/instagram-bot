@@ -213,6 +213,20 @@ async function setup() {
   await db.query(`CREATE INDEX IF NOT EXISTS photo_inquiries_status_idx ON photo_inquiries(status)`);
   await db.query(`CREATE INDEX IF NOT EXISTS photo_inquiries_cid_idx    ON photo_inquiries(customer_id)`);
 
+  // ── whatsapp_numbers ──────────────────────────────────────────────────────────
+  // Maps Meta phone_number_id → business_id for multi-tenant routing
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS whatsapp_numbers (
+      phone_number_id  TEXT PRIMARY KEY,
+      business_id      TEXT NOT NULL,
+      phone_number     TEXT NOT NULL DEFAULT '',
+      token            TEXT NOT NULL DEFAULT '',
+      active           BOOLEAN NOT NULL DEFAULT true,
+      registered_at    BIGINT NOT NULL DEFAULT 0
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS wa_numbers_bid_idx ON whatsapp_numbers(business_id)`);
+
   console.log("[Setup] All tables ready ✓");
 }
 
