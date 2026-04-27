@@ -1,86 +1,80 @@
-// ── WhatsApp Status Reply Handler ─────────────────────────────────────────────
-// When a customer sees a WhatsApp Business Status and replies to it,
-// the message arrives with a `context` object containing the status message ID.
-//
-// Business owner logs statuses via the Selly app (POST /api/status/log)
-// Bot maps incoming status replies to the correct product automatically.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const fs   = require("fs");
-const path = require("path");
-
-const DATA_DIR  = path.join(__dirname, "../data");
-const DATA_FILE = path.join(DATA_DIR, "status_log.json");
+// ── WhatsApp Status Reply Handler — Railway PostgreSQL backed ──────────────────
+const db = require("./db");
 
 const STATUS_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-// ── Persistence ───────────────────────────────────────────────────────────────
-function load() {
-  try {
-    if (fs.existsSync(DATA_FILE)) return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-  } catch {}
-  return { statuses: [] };
-}
+// ── Log a status posted by the business owner ─────────────────────────────────
+async function logStatus(statusData) {
+  const now   = Date.now();
+  const entry = {
+    id          : `status_${now}`,
+    caption     : statusData.caption     || "",
+    product_id  : statusData.productId   || null,
+    product_name: statusData.productName || null,
+    image_url   : statusData.imageUrl    || null,
+    posted_at   : now,
+  };
 
-function save(db) {
   try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
-  } catch (err) {
-    console.error("[status] Save error:", err.message);
+    // Prune expired
+    await db.query(`DELETE FROM status_logs WHERE posted_at < $1`, [now - STATUS_TTL_MS]);
+
+    await db.query(
+      `INSERT INTO status_logs (id, caption, product_id, product_name, image_url, posted_at)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [entry.id, entry.caption, entry.product_id, entry.product_name, entry.image_url, entry.posted_at]
+    );
+
+    // Keep max 20 entries
+    await db.query(`
+      DELETE FROM status_logs
+      WHERE id NOT IN (SELECT id FROM status_logs ORDER BY posted_at DESC LIMIT 20)
+    `);
+
+    console.log(`[status] Logged: "${entry.caption.slice(0, 60)}"`);
+    return _toStatus(entry);
+  } catch (e) {
+    console.error("[status] logStatus error:", e.message);
+    return _toStatus(entry);
   }
 }
 
-// ── Log a status posted by the business owner ─────────────────────────────────
-// Called from Selly app (POST /api/status/log)
-// { caption, productId?, productName?, imageUrl?, postedAt? }
-function logStatus(statusData) {
-  const db  = load();
-  const now = Date.now();
-
-  // Prune expired entries
-  db.statuses = (db.statuses || []).filter(s => now - s.postedAt < STATUS_TTL_MS);
-
-  const entry = {
-    id         : `status_${now}`,
-    caption    : statusData.caption    || "",
-    productId  : statusData.productId  || null,
-    productName: statusData.productName|| null,
-    imageUrl   : statusData.imageUrl   || null,
-    postedAt   : now,
-  };
-
-  db.statuses.unshift(entry); // most recent first
-  if (db.statuses.length > 20) db.statuses = db.statuses.slice(0, 20);
-
-  save(db);
-  console.log(`[status] Logged status: "${entry.caption.slice(0, 60)}"`);
-  return entry;
-}
-
-// ── Detect if a WhatsApp message is a reply to a status ─────────────────────
-// WhatsApp includes msg.context.id when someone replies to a status/message
+// ── Detect if a WhatsApp message is a reply to a status ──────────────────────
 function isStatusReply(msg) {
   return !!(msg && msg.context && msg.context.id);
 }
 
-// ── Get the most recently active status product ───────────────────────────────
-function getMostRecentStatus() {
-  const db  = load();
-  const now = Date.now();
-  const live = (db.statuses || []).filter(s => now - s.postedAt < STATUS_TTL_MS);
-  return live.length ? live[0] : null;
+// ── Get the most recently active status ──────────────────────────────────────
+async function getMostRecentStatus() {
+  try {
+    const now = Date.now();
+    const { rows } = await db.query(
+      `SELECT * FROM status_logs WHERE posted_at > $1 ORDER BY posted_at DESC LIMIT 1`,
+      [now - STATUS_TTL_MS]
+    );
+    return rows[0] ? _toStatus(rows[0]) : null;
+  } catch (e) {
+    console.error("[status] getMostRecentStatus error:", e.message);
+    return null;
+  }
 }
 
 // ── Get all active (within 24h) statuses ─────────────────────────────────────
-function getActiveStatuses() {
-  const db  = load();
-  const now = Date.now();
-  return (db.statuses || []).filter(s => now - s.postedAt < STATUS_TTL_MS);
+async function getActiveStatuses() {
+  try {
+    const now = Date.now();
+    const { rows } = await db.query(
+      `SELECT * FROM status_logs WHERE posted_at > $1 ORDER BY posted_at DESC`,
+      [now - STATUS_TTL_MS]
+    );
+    return rows.map(_toStatus);
+  } catch (e) {
+    console.error("[status] getActiveStatuses error:", e.message);
+    return [];
+  }
 }
 
-// ── Build the bot reply for a status inquiry ──────────────────────────────────
-// lang: detected customer language
+// ── Build bot reply for a status inquiry ─────────────────────────────────────
 function buildStatusReply(status, lang = "english") {
   if (!status) {
     const msgs = {
@@ -91,9 +85,7 @@ function buildStatusReply(status, lang = "english") {
     return msgs[lang] || msgs.english;
   }
 
-  const productLine = status.productName
-    ? `*${status.productName}*`
-    : "this product";
+  const productLine = status.productName ? `*${status.productName}*` : "this product";
 
   const msgs = {
     hindi:
@@ -120,21 +112,29 @@ function buildStatusReply(status, lang = "english") {
   return msgs[lang] || msgs.english;
 }
 
-// ── Clear old statuses (manual cleanup) ──────────────────────────────────────
-function pruneExpired() {
-  const db  = load();
-  const now = Date.now();
-  const before = (db.statuses || []).length;
-  db.statuses  = (db.statuses || []).filter(s => now - s.postedAt < STATUS_TTL_MS);
-  if (db.statuses.length < before) save(db);
-  return before - db.statuses.length;
+// ── Clear expired statuses ────────────────────────────────────────────────────
+async function pruneExpired() {
+  try {
+    const { rowCount } = await db.query(
+      `DELETE FROM status_logs WHERE posted_at < $1`,
+      [Date.now() - STATUS_TTL_MS]
+    );
+    return rowCount || 0;
+  } catch (e) {
+    console.error("[status] pruneExpired error:", e.message);
+    return 0;
+  }
 }
 
-module.exports = {
-  logStatus,
-  isStatusReply,
-  getMostRecentStatus,
-  getActiveStatuses,
-  buildStatusReply,
-  pruneExpired,
-};
+function _toStatus(row) {
+  return {
+    id         : row.id,
+    caption    : row.caption     || "",
+    productId  : row.product_id  || null,
+    productName: row.product_name|| null,
+    imageUrl   : row.image_url   || null,
+    postedAt   : row.posted_at   || 0,
+  };
+}
+
+module.exports = { logStatus, isStatusReply, getMostRecentStatus, getActiveStatuses, buildStatusReply, pruneExpired };

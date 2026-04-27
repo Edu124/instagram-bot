@@ -1,4 +1,4 @@
-// ── Database Setup — auto-creates tables on startup ────────────────────────────
+// ── Database Setup — auto-creates all tables on startup ────────────────────────
 const db = require("./db");
 
 async function setup() {
@@ -77,6 +77,74 @@ async function setup() {
     )
   `);
   await db.query(`CREATE INDEX IF NOT EXISTS customers_ref_idx ON bot_customers(referral_code)`);
+
+  // ── loyalty_points ────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS loyalty_points (
+      customer_id    TEXT PRIMARY KEY,
+      points         INTEGER NOT NULL DEFAULT 0,
+      total_earned   INTEGER NOT NULL DEFAULT 0,
+      total_redeemed INTEGER NOT NULL DEFAULT 0,
+      orders_count   INTEGER NOT NULL DEFAULT 0,
+      history        JSONB NOT NULL DEFAULT '[]',
+      updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  // ── subscriptions ─────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS subscriptions (
+      business_id          TEXT PRIMARY KEY,
+      status               TEXT NOT NULL DEFAULT 'trial',
+      plan                 TEXT NOT NULL DEFAULT 'starter',
+      monthly_fee          NUMERIC NOT NULL DEFAULT 3000,
+      trial_started        BIGINT NOT NULL DEFAULT 0,
+      trial_ends           BIGINT NOT NULL DEFAULT 0,
+      current_period_start BIGINT NOT NULL DEFAULT 0,
+      current_period_end   BIGINT NOT NULL DEFAULT 0,
+      paid_until           BIGINT NOT NULL DEFAULT 0,
+      created_at           BIGINT NOT NULL DEFAULT 0,
+      updated_at           BIGINT NOT NULL DEFAULT 0,
+      payment_history      JSONB NOT NULL DEFAULT '[]'
+    )
+  `);
+
+  // ── commissions ───────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS commissions (
+      id                TEXT PRIMARY KEY,
+      business_id       TEXT NOT NULL,
+      order_id          TEXT,
+      promo_source      TEXT,
+      commission_amount NUMERIC NOT NULL DEFAULT 0,
+      breakdown         JSONB NOT NULL DEFAULT '[]',
+      status            TEXT NOT NULL DEFAULT 'pending',
+      created_at        BIGINT NOT NULL DEFAULT 0
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS commissions_bid_idx ON commissions(business_id)`);
+
+  // ── festival_broadcasts ───────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS festival_broadcasts (
+      festival_name TEXT PRIMARY KEY,
+      sent_at       TEXT NOT NULL,
+      sent_count    INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+
+  // ── status_logs ───────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS status_logs (
+      id           TEXT PRIMARY KEY,
+      caption      TEXT NOT NULL DEFAULT '',
+      product_id   TEXT,
+      product_name TEXT,
+      image_url    TEXT,
+      posted_at    BIGINT NOT NULL DEFAULT 0
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS status_logs_posted_idx ON status_logs(posted_at)`);
 
   console.log("[Setup] All tables ready ✓");
 }

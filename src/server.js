@@ -276,7 +276,7 @@ async function routeMessage(customerId, sess, message, name) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function handleStatusReply(customerId, sess, text) {
   const lang           = sess.lang || "english";
-  const recentStatus   = status.getMostRecentStatus();
+  const recentStatus   = await status.getMostRecentStatus();
 
   // If customer replies with a number, handle product selection
   if (sess.state === "status_inquiry") {
@@ -599,7 +599,7 @@ async function handleMobileCollection(customerId, sess, message) {
   session.update(customerId, { mobile, state: "choosing_payment" });
 
   // ── Check if customer has redeemable loyalty points ────────────────────────
-  const redeemInfo = loyalty.getRedeemInfo(customerId);
+  const redeemInfo = await loyalty.getRedeemInfo(customerId);
   let loyaltyLine  = "";
   if (redeemInfo.canRedeem) {
     loyaltyLine = {
@@ -632,12 +632,12 @@ async function handlePaymentChoice(customerId, sess, message) {
 
   // Loyalty points redemption
   if (msg.includes("use points") || msg === "redeem") {
-    const redeemInfo = loyalty.getRedeemInfo(customerId);
+    const redeemInfo = await loyalty.getRedeemInfo(customerId);
     if (!redeemInfo.canRedeem) {
       const nopts = { hindi: "Enough points नहीं हैं अभी।", hinglish: "Abhi enough points nahi hain.", english: "You don't have enough points to redeem yet." };
       return send(customerId, nopts[lang] || nopts.english);
     }
-    const result = loyalty.redeemPoints(customerId, redeemInfo.maxSets);
+    const result = await loyalty.redeemPoints(customerId, redeemInfo.maxSets);
     session.update(customerId, { loyaltyDiscount: result.discountAmount });
     const redeemed = {
       hindi   : `✅ ${result.pointsUsed} points redeem हुए — ₹${result.discountAmount} discount!\n\nAbhi payment method choose करें:\n1️⃣ Online\n2️⃣ COD`,
@@ -684,7 +684,7 @@ async function placeOrder(customerId, sess, paymentMode) {
     return age > 24 * 60 * 60 * 1000 ? null : sess.promoSource;
   })();
 
-  const commResult = commissionEngine.calculate(sess.cart, promoSource);
+  const commResult  = commissionEngine.calculate(sess.cart, promoSource);
 
   const order = await orders.create({
     customerId,
@@ -700,7 +700,7 @@ async function placeOrder(customerId, sess, paymentMode) {
   });
 
   if (commResult.eligible) {
-    commissionEngine.record(DEFAULT_BUSINESS_ID, order.id, sess.cart, promoSource);
+    await commissionEngine.record(DEFAULT_BUSINESS_ID, order.id, sess.cart, promoSource);
   }
   session.update(customerId, { promoSource: null, promoSentAt: null, loyaltyDiscount: 0 });
   await customers.touch(customerId, { name: sess.name, mobile: sess.mobile });
@@ -770,19 +770,19 @@ async function confirmOrder(customerId, order, isOnline = true) {
 
   // Award loyalty points
   const orderAmount   = order.bill?.total || 0;
-  const basePoints    = loyalty.calcOrderPoints(orderAmount);
-  const isFirst       = loyalty.isFirstOrder(customerId);
-  const { pointsAdded } = loyalty.addPoints(customerId, basePoints, "purchase", order.id);
+  const basePoints      = loyalty.calcOrderPoints(orderAmount);
+  const isFirst         = await loyalty.isFirstOrder(customerId);
+  const { pointsAdded } = await loyalty.addPoints(customerId, basePoints, "purchase", order.id);
 
   // First order bonus
   let bonusPoints = 0;
   if (isFirst) {
-    loyalty.addPoints(customerId, 50, "first_order", order.id);
+    await loyalty.addPoints(customerId, 50, "first_order", order.id);
     bonusPoints = 50;
   }
 
   const totalAwarded  = pointsAdded + bonusPoints;
-  const loyaltyRecord = loyalty.getRecord(customerId);
+  const loyaltyRecord = await loyalty.getRecord(customerId);
   const tier          = loyalty.getTier(loyaltyRecord.totalEarned);
 
   session.reset(customerId);
@@ -866,9 +866,9 @@ async function handlePaymentSuccess(paymentLinkId) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function handleLoyaltyCheck(customerId, sess) {
   const lang   = sess.lang || "english";
-  const record = loyalty.getRecord(customerId);
+  const record = await loyalty.getRecord(customerId);
   const tier   = loyalty.getTier(record.totalEarned);
-  const redeem = loyalty.getRedeemInfo(customerId);
+  const redeem = await loyalty.getRedeemInfo(customerId);
 
   const msgs = {
     hindi:
@@ -1139,33 +1139,34 @@ app.post("/api/insta/fetch", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // POST /api/status/log — Selly app calls this when business owner posts a status
-app.post("/api/status/log", (req, res) => {
-  const entry = status.logStatus(req.body);
+app.post("/api/status/log", async (req, res) => {
+  const entry = await status.logStatus(req.body);
   res.json({ ok: true, entry });
 });
 
 // GET /api/status/active — list active statuses
-app.get("/api/status/active", (req, res) => {
-  res.json({ statuses: status.getActiveStatuses() });
+app.get("/api/status/active", async (req, res) => {
+  res.json({ statuses: await status.getActiveStatuses() });
 });
 
 // GET /api/loyalty/:customerId — get loyalty record
-app.get("/api/loyalty/:id", (req, res) => {
-  const record = loyalty.getRecord(req.params.id);
-  const tier   = loyalty.getTier(record.totalEarned);
-  res.json({ record, tier, redeemInfo: loyalty.getRedeemInfo(req.params.id) });
+app.get("/api/loyalty/:id", async (req, res) => {
+  const record     = await loyalty.getRecord(req.params.id);
+  const tier       = loyalty.getTier(record.totalEarned);
+  const redeemInfo = await loyalty.getRedeemInfo(req.params.id);
+  res.json({ record, tier, redeemInfo });
 });
 
 // GET /api/loyalty/leaderboard — top customers by points
 app.get("/api/loyalty/leaderboard", async (req, res) => {
   const { customers: allCustomers = [] } = await customers.getAll();
-  const leaderboard  = allCustomers.map(c => ({
-    ...c,
-    loyaltyRecord: loyalty.getRecord(c.id),
-    tier         : loyalty.getTier(loyalty.getRecord(c.id).totalEarned),
-  }))
-  .sort((a, b) => b.loyaltyRecord.points - a.loyaltyRecord.points)
-  .slice(0, 20);
+  const withLoyalty = await Promise.all(allCustomers.map(async c => {
+    const loyaltyRecord = await loyalty.getRecord(c.id);
+    return { ...c, loyaltyRecord, tier: loyalty.getTier(loyaltyRecord.totalEarned) };
+  }));
+  const leaderboard = withLoyalty
+    .sort((a, b) => b.loyaltyRecord.points - a.loyaltyRecord.points)
+    .slice(0, 20);
   res.json({ leaderboard });
 });
 
@@ -1185,7 +1186,7 @@ app.post("/api/promote/festival", async (req, res) => {
   const { festivalName, discount = 10, businessName = "our store" } = req.body;
   if (!festivalName) return res.status(400).json({ error: "festivalName required" });
 
-  if (festivals.wasAlreadyBroadcast(festivalName)) {
+  if (await festivals.wasAlreadyBroadcast(festivalName)) {
     return res.json({ ok: false, reason: "Already broadcast for this festival. Clear log to resend." });
   }
 
@@ -1202,7 +1203,7 @@ app.post("/api/promote/festival", async (req, res) => {
     } catch {}
   }
 
-  festivals.logBroadcast(festivalName, sent);
+  await festivals.logBroadcast(festivalName, sent);
   console.log(`[festival] ${festivalName} broadcast sent to ${sent} customers`);
   res.json({ ok: true, sent, total: allCustomers.length });
 });
@@ -1244,19 +1245,25 @@ app.post("/api/promote/abandoned", async (req, res) => {
 });
 
 // ── Billing & Subscription APIs ───────────────────────────────────────────────
-app.get("/api/billing/summary",       (req, res) => {
-  const bid = req.query.businessId || DEFAULT_BUSINESS_ID;
-  const sub = subscriptions.get(bid);
-  res.json({ subscription: { status: sub.status, plan: sub.plan, monthlyFee: sub.monthlyFee, daysRemaining: subscriptions.daysRemaining(bid), isActive: subscriptions.isActive(bid) }, billing: commissionEngine.getMonthlySummary(bid, sub.monthlyFee) });
+app.get("/api/billing/summary", async (req, res) => {
+  const bid     = req.query.businessId || DEFAULT_BUSINESS_ID;
+  const sub     = await subscriptions.get(bid);
+  const billing = await commissionEngine.getMonthlySummary(bid, sub.monthlyFee);
+  const [days, active] = await Promise.all([subscriptions.daysRemaining(bid), subscriptions.isActive(bid)]);
+  res.json({ subscription: { status: sub.status, plan: sub.plan, monthlyFee: sub.monthlyFee, daysRemaining: days, isActive: active }, billing });
 });
-app.get("/api/billing/commissions",   (req, res) => res.json({ commissions: commissionEngine.getAll({ businessId: req.query.businessId || DEFAULT_BUSINESS_ID, month: req.query.month }) }));
-app.get("/api/billing/subscription",  (req, res) => {
-  const bid = req.query.businessId || DEFAULT_BUSINESS_ID;
-  res.json({ ...subscriptions.get(bid), isActive: subscriptions.isActive(bid), daysRemaining: subscriptions.daysRemaining(bid) });
+app.get("/api/billing/commissions", async (req, res) => {
+  res.json({ commissions: await commissionEngine.getAll({ businessId: req.query.businessId || DEFAULT_BUSINESS_ID, month: req.query.month }) });
 });
-app.post("/api/billing/payment",      (req, res) => {
+app.get("/api/billing/subscription", async (req, res) => {
+  const bid  = req.query.businessId || DEFAULT_BUSINESS_ID;
+  const sub  = await subscriptions.get(bid);
+  const [active, days] = await Promise.all([subscriptions.isActive(bid), subscriptions.daysRemaining(bid)]);
+  res.json({ ...sub, isActive: active, daysRemaining: days });
+});
+app.post("/api/billing/payment", async (req, res) => {
   const { businessId = DEFAULT_BUSINESS_ID, amount, paymentId, method } = req.body;
-  res.json({ ok: true, subscription: subscriptions.recordPayment(businessId, { amount, paymentId, method }) });
+  res.json({ ok: true, subscription: await subscriptions.recordPayment(businessId, { amount, paymentId, method }) });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1288,7 +1295,7 @@ app.post("/test/chat", async (req, res) => {
       cart        : updatedSess?.cart || [],
       sessionState: updatedSess?.state,
       lang        : updatedSess?.lang,
-      loyalty     : loyalty.getRedeemInfo(subscriber_id),
+      loyalty     : await loyalty.getRedeemInfo(subscriber_id),
     });
   } catch (err) {
     res.json({ replies: ["⚠️ Error: " + err.message], cart: [] });
@@ -1334,7 +1341,7 @@ setInterval(runAbandonedCartRecovery, RECOVERY_INTERVAL);
 async function checkFestivalBroadcasts() {
   const alerts = festivals.getAlertsForToday();
   for (const f of alerts) {
-    if (!festivals.wasAlreadyBroadcast(f.name)) {
+    if (!await festivals.wasAlreadyBroadcast(f.name)) {
       console.log(`[festival] Auto-alert: ${f.name} is coming up — use /api/promote/festival to broadcast.`);
       // We log but don't auto-send — business owner should confirm
     }

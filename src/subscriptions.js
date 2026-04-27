@@ -1,140 +1,163 @@
-// ── Subscription Manager ───────────────────────────────────────────────────────
-// Tracks each business's subscription status.
-// Model:
-//   ₹3,000 / month flat fee
-//   + 5% commission on promo-driven orders where any item price > ₹1,000
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Subscription Manager — Railway PostgreSQL backed ───────────────────────────
+const db = require("./db");
 
-const fs   = require("fs");
-const path = require("path");
-
-const MONTHLY_FEE    = 3000;   // ₹3,000/month
-const COMMISSION_PCT = 0.05;   // 5%
-const COMMISSION_MIN = 1000;   // only on items above ₹1,000
-const TRIAL_DAYS     = 14;     // free trial period
-
-let subscriptions = new Map(); // businessId → subscription object
+const MONTHLY_FEE    = 3000;
+const COMMISSION_PCT = 0.05;
+const COMMISSION_MIN = 1000;
+const TRIAL_DAYS     = 14;
 
 // ── Create or get subscription ────────────────────────────────────────────────
-function getOrCreate(businessId) {
-  if (subscriptions.has(businessId)) return subscriptions.get(businessId);
+async function getOrCreate(businessId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM subscriptions WHERE business_id = $1`,
+      [businessId]
+    );
+    if (rows[0]) return _toSub(rows[0]);
 
-  const now  = Date.now();
-  const sub  = {
-    businessId,
-    status       : "trial",              // trial | active | expired | suspended
-    plan         : "starter",            // starter (only plan for now)
-    monthlyFee   : MONTHLY_FEE,
-    trialStarted : now,
-    trialEnds    : now + TRIAL_DAYS * 24 * 60 * 60 * 1000,
-    currentPeriodStart: now,
-    currentPeriodEnd  : now + 30 * 24 * 60 * 60 * 1000,
-    paidUntil    : now + TRIAL_DAYS * 24 * 60 * 60 * 1000,
-    createdAt    : now,
-    updatedAt    : now,
-    paymentHistory: [],
-  };
+    const now = Date.now();
+    const sub = {
+      business_id          : businessId,
+      status               : "trial",
+      plan                 : "starter",
+      monthly_fee          : MONTHLY_FEE,
+      trial_started        : now,
+      trial_ends           : now + TRIAL_DAYS * 86400000,
+      current_period_start : now,
+      current_period_end   : now + 30 * 86400000,
+      paid_until           : now + TRIAL_DAYS * 86400000,
+      created_at           : now,
+      updated_at           : now,
+      payment_history      : [],
+    };
 
-  subscriptions.set(businessId, sub);
-  persist();
-  return sub;
+    const { rows: inserted } = await db.query(
+      `INSERT INTO subscriptions
+         (business_id, status, plan, monthly_fee, trial_started, trial_ends,
+          current_period_start, current_period_end, paid_until, created_at, updated_at, payment_history)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       RETURNING *`,
+      [
+        sub.business_id, sub.status, sub.plan, sub.monthly_fee,
+        sub.trial_started, sub.trial_ends, sub.current_period_start,
+        sub.current_period_end, sub.paid_until, sub.created_at,
+        sub.updated_at, JSON.stringify(sub.payment_history),
+      ]
+    );
+    return _toSub(inserted[0] || sub);
+  } catch (e) {
+    console.error("[Subscriptions] getOrCreate error:", e.message);
+    const now = Date.now();
+    return { businessId, status: "trial", plan: "starter", monthlyFee: MONTHLY_FEE,
+             trialStarted: now, trialEnds: now + TRIAL_DAYS * 86400000,
+             paidUntil: now + TRIAL_DAYS * 86400000, paymentHistory: [], createdAt: now, updatedAt: now };
+  }
 }
 
-// ── Check if subscription is active (trial or paid) ───────────────────────────
-function isActive(businessId) {
-  const sub = getOrCreate(businessId);
+// ── Check if active (trial or paid) ──────────────────────────────────────────
+async function isActive(businessId) {
+  const sub = await getOrCreate(businessId);
   const now = Date.now();
-
   if (sub.status === "trial")  return now < sub.trialEnds;
   if (sub.status === "active") return now < sub.paidUntil;
   return false;
 }
 
-// ── Days remaining on current period ──────────────────────────────────────────
-function daysRemaining(businessId) {
-  const sub    = getOrCreate(businessId);
+// ── Days remaining ────────────────────────────────────────────────────────────
+async function daysRemaining(businessId) {
+  const sub    = await getOrCreate(businessId);
   const now    = Date.now();
   const target = sub.status === "trial" ? sub.trialEnds : sub.paidUntil;
-  return Math.max(0, Math.ceil((target - now) / (24 * 60 * 60 * 1000)));
+  return Math.max(0, Math.ceil((target - now) / 86400000));
 }
 
 // ── Record a payment ──────────────────────────────────────────────────────────
-function recordPayment(businessId, { amount, paymentId, method = "razorpay" }) {
-  const sub = getOrCreate(businessId);
-  const now = Date.now();
+async function recordPayment(businessId, { amount, paymentId, method = "razorpay" }) {
+  try {
+    const sub  = await getOrCreate(businessId);
+    const now  = Date.now();
+    const base = Math.max(sub.paidUntil || 0, now);
+    const newPaidUntil = base + 30 * 86400000;
 
-  // Extend by 30 days from now (or from current end, whichever is later)
-  const base = Math.max(sub.paidUntil || 0, now);
-  sub.paidUntil = base + 30 * 24 * 60 * 60 * 1000;
-  sub.status    = "active";
-  sub.updatedAt = now;
+    const newHistory = [
+      ...(sub.paymentHistory || []),
+      { amount, paymentId, method, paidAt: now, periodEnd: newPaidUntil },
+    ];
 
-  sub.paymentHistory.push({
-    amount,
-    paymentId,
-    method,
-    paidAt: now,
-    periodEnd: sub.paidUntil,
-  });
-
-  subscriptions.set(businessId, sub);
-  persist();
-  return sub;
+    const { rows } = await db.query(
+      `UPDATE subscriptions SET status='active', paid_until=$1, updated_at=$2, payment_history=$3
+       WHERE business_id=$4 RETURNING *`,
+      [newPaidUntil, now, JSON.stringify(newHistory), businessId]
+    );
+    return _toSub(rows[0]);
+  } catch (e) {
+    console.error("[Subscriptions] recordPayment error:", e.message);
+    return null;
+  }
 }
 
 // ── Mark as expired ───────────────────────────────────────────────────────────
-function expire(businessId) {
-  const sub = getOrCreate(businessId);
-  sub.status    = "expired";
-  sub.updatedAt = Date.now();
-  subscriptions.set(businessId, sub);
-  persist();
+async function expire(businessId) {
+  try {
+    await db.query(
+      `UPDATE subscriptions SET status='expired', updated_at=$1 WHERE business_id=$2`,
+      [Date.now(), businessId]
+    );
+  } catch (e) {
+    console.error("[Subscriptions] expire error:", e.message);
+  }
 }
 
-// ── Get full subscription object ──────────────────────────────────────────────
-function get(businessId) {
+// ── Get subscription ──────────────────────────────────────────────────────────
+async function get(businessId) {
   return getOrCreate(businessId);
 }
 
-// ── Get all subscriptions (admin view) ────────────────────────────────────────
-function getAll() {
-  return Array.from(subscriptions.values());
-}
-
-// ── Auto-expire check (run periodically) ─────────────────────────────────────
-function runExpiryCheck() {
-  const now = Date.now();
-  for (const [id, sub] of subscriptions) {
-    if (sub.status === "trial"  && now > sub.trialEnds)  expire(id);
-    if (sub.status === "active" && now > sub.paidUntil)  expire(id);
-  }
-}
-
-// ── Persist ───────────────────────────────────────────────────────────────────
-function persist() {
-  const dir      = path.join(__dirname, "../data");
-  const filePath = path.join(dir, "subscriptions.json");
+// ── Get all subscriptions ─────────────────────────────────────────────────────
+async function getAll() {
   try {
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(Array.from(subscriptions.values()), null, 2));
+    const { rows } = await db.query(`SELECT * FROM subscriptions ORDER BY created_at DESC`);
+    return rows.map(_toSub);
   } catch (e) {
-    console.error("[Subscriptions] Persist error:", e.message);
+    console.error("[Subscriptions] getAll error:", e.message);
+    return [];
   }
 }
 
-function load() {
-  const filePath = path.join(__dirname, "../data/subscriptions.json");
+// ── Auto-expire check ─────────────────────────────────────────────────────────
+async function runExpiryCheck() {
+  const now = Date.now();
   try {
-    const arr = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    arr.forEach(s => subscriptions.set(s.businessId, s));
-    console.log(`[Subscriptions] Loaded ${subscriptions.size} business subscriptions`);
-  } catch {
-    console.log("[Subscriptions] No subscriptions file, starting fresh");
+    await db.query(
+      `UPDATE subscriptions SET status='expired', updated_at=$1
+       WHERE (status='trial' AND trial_ends < $1)
+          OR (status='active' AND paid_until < $1)`,
+      [now]
+    );
+  } catch (e) {
+    console.error("[Subscriptions] runExpiryCheck error:", e.message);
   }
 }
 
-load();
-// Check for expired subscriptions every hour
+// ── Map DB row → subscription shape ──────────────────────────────────────────
+function _toSub(row) {
+  return {
+    businessId          : row.business_id,
+    status              : row.status              || "trial",
+    plan                : row.plan                || "starter",
+    monthlyFee          : row.monthly_fee         || MONTHLY_FEE,
+    trialStarted        : row.trial_started       || 0,
+    trialEnds           : row.trial_ends          || 0,
+    currentPeriodStart  : row.current_period_start|| 0,
+    currentPeriodEnd    : row.current_period_end  || 0,
+    paidUntil           : row.paid_until          || 0,
+    createdAt           : row.created_at          || 0,
+    updatedAt           : row.updated_at          || 0,
+    paymentHistory      : row.payment_history     || [],
+  };
+}
+
+// Start hourly expiry check
 setInterval(runExpiryCheck, 60 * 60 * 1000);
 
 module.exports = {

@@ -1,16 +1,11 @@
-// ── Indian Festival Marketing Engine ─────────────────────────────────────────
+// ── Indian Festival Marketing Engine — Railway PostgreSQL backed ───────────────
 // Maintains a calendar of Indian festivals for 2026-2027
 // Generates campaign messages and tracks broadcast history
 // ─────────────────────────────────────────────────────────────────────────────
 
-const fs   = require("fs");
-const path = require("path");
-
-const DATA_DIR  = path.join(__dirname, "../data");
-const LOG_FILE  = path.join(DATA_DIR, "festival_broadcasts.json");
+const db = require("./db");
 
 // ── Festival Calendar (2026 + 2027) ───────────────────────────────────────────
-// daysBeforeAlert: how many days before the festival to start suggesting campaign
 const FESTIVALS = [
   // ── 2026 ─────────────────────────────────────────────────────────────────
   { name: "Makar Sankranti",  date: "2026-01-14", emoji: "🪁",  alert: 5,  tags: ["all"] },
@@ -41,88 +36,51 @@ const FESTIVALS = [
   { name: "Christmas",        date: "2027-12-25", emoji: "🎄",  alert: 7,  tags: ["all","gifting"] },
 ];
 
-// ── Default campaign message generators ──────────────────────────────────────
+// ── Campaign message templates ────────────────────────────────────────────────
 const CAMPAIGN_TEMPLATES = {
   "Holi": (biz, discount) =>
-    `🎨 *Holi Hai! ${biz}* 🎨\n\n` +
-    `Rang, khushi aur naye kapde — Holi ki hardik shubhkamnayein! 🌈\n\n` +
-    `🎁 *Holi Dhamaka Sale — ${discount}% OFF*\n` +
-    `Aaj aur kal sirf! ⏰\n\n` +
-    `👇 Reply *SHOP* to browse our collection`,
+    `🎨 *Holi Hai! ${biz}* 🎨\n\nRang, khushi aur naye kapde — Holi ki hardik shubhkamnayein! 🌈\n\n🎁 *Holi Dhamaka Sale — ${discount}% OFF*\nAaj aur kal sirf! ⏰\n\n👇 Reply *SHOP* to browse our collection`,
 
   "Diwali": (biz, discount) =>
-    `🪔 *Happy Diwali from ${biz}!* 🪔\n\n` +
-    `Is Diwali apne aap ko aur apno ko special feel karao ✨\n\n` +
-    `🎁 *Diwali Dhamaka — Upto ${discount}% OFF*\n` +
-    `Offer sirf aaj raat tak! 🕯️\n\n` +
-    `👇 Reply *SHOP* to order now`,
+    `🪔 *Happy Diwali from ${biz}!* 🪔\n\nIs Diwali apne aap ko aur apno ko special feel karao ✨\n\n🎁 *Diwali Dhamaka — Upto ${discount}% OFF*\nOffer sirf aaj raat tak! 🕯️\n\n👇 Reply *SHOP* to order now`,
 
   "Eid al-Fitr": (biz, discount) =>
-    `🌙 *Eid Mubarak! ${biz}* 🌙\n\n` +
-    `Naye kapde, naya jazbah, nayi khushi! 💫\n\n` +
-    `🎁 *Eid Special — ${discount}% OFF* on all ethnic wear\n` +
-    `Aaj aur kal! ⭐\n\n` +
-    `👇 Reply *SHOP* to browse`,
+    `🌙 *Eid Mubarak! ${biz}* 🌙\n\nNaye kapde, naya jazbah, nayi khushi! 💫\n\n🎁 *Eid Special — ${discount}% OFF* on all ethnic wear\nAaj aur kal! ⭐\n\n👇 Reply *SHOP* to browse`,
 
   "Navratri": (biz, discount) =>
-    `💃 *Navratri Mubarak! ${biz}* 💃\n\n` +
-    `9 din, 9 rang, 9 looks! Is Navratri apna best look pao 🌸\n\n` +
-    `🎁 *Navratri Sale — ${discount}% OFF*\n` +
-    `Lehenga, Chaniya Choli, Ethnic wear sab pe!\n\n` +
-    `👇 Reply *SHOP* to explore`,
+    `💃 *Navratri Mubarak! ${biz}* 💃\n\n9 din, 9 rang, 9 looks! Is Navratri apna best look pao 🌸\n\n🎁 *Navratri Sale — ${discount}% OFF*\nLehenga, Chaniya Choli, Ethnic wear sab pe!\n\n👇 Reply *SHOP* to explore`,
 
   "Raksha Bandhan": (biz, discount) =>
-    `🧡 *Happy Raksha Bandhan! ${biz}* 🧡\n\n` +
-    `Apni behen ko kuch khaas gift karo is Rakhi! 🎁\n\n` +
-    `🎁 *Rakhi Special — ₹${discount} OFF* on orders above ₹599\n` +
-    `Aaj tak sirf! ✨\n\n` +
-    `👇 Reply *SHOP* to order`,
+    `🧡 *Happy Raksha Bandhan! ${biz}* 🧡\n\nApni behen ko kuch khaas gift karo is Rakhi! 🎁\n\n🎁 *Rakhi Special — ₹${discount} OFF* on orders above ₹599\nAaj tak sirf! ✨\n\n👇 Reply *SHOP* to order`,
 
   "Valentine's Day": (biz, discount) =>
-    `❤️ *Happy Valentine's Day! ${biz}* ❤️\n\n` +
-    `Unhe surprise karo aaj! Kuch special order karo 💝\n\n` +
-    `🎁 *Valentine Special — ${discount}% OFF*\n` +
-    `Free gift wrapping on all orders today! 🎀\n\n` +
-    `👇 Reply *SHOP* to browse`,
+    `❤️ *Happy Valentine's Day! ${biz}* ❤️\n\nUnhe surprise karo aaj! Kuch special order karo 💝\n\n🎁 *Valentine Special — ${discount}% OFF*\nFree gift wrapping on all orders today! 🎀\n\n👇 Reply *SHOP* to browse`,
 
   "Mother's Day": (biz, discount) =>
-    `💐 *Happy Mother's Day! ${biz}* 💐\n\n` +
-    `Maa ke liye kuch khaas! Unhein feel special karao 🥰\n\n` +
-    `🎁 *Mother's Day Sale — ${discount}% OFF*\n` +
-    `Sarees, suits, kurtas aur bahut kuch!\n\n` +
-    `👇 Reply *SHOP* to gift`,
+    `💐 *Happy Mother's Day! ${biz}* 💐\n\nMaa ke liye kuch khaas! Unhein feel special karao 🥰\n\n🎁 *Mother's Day Sale — ${discount}% OFF*\nSarees, suits, kurtas aur bahut kuch!\n\n👇 Reply *SHOP* to gift`,
 
   "Christmas": (biz, discount) =>
-    `🎄 *Merry Christmas! ${biz}* 🎄\n\n` +
-    `Is Christmas season mein kuch khaas pehno! ✨🎅\n\n` +
-    `🎁 *Christmas Sale — ${discount}% OFF*\n` +
-    `Sab ke liye kuch na kuch! 🎁\n\n` +
-    `👇 Reply *SHOP* to explore`,
+    `🎄 *Merry Christmas! ${biz}* 🎄\n\nIs Christmas season mein kuch khaas pehno! ✨🎅\n\n🎁 *Christmas Sale — ${discount}% OFF*\nSab ke liye kuch na kuch! 🎁\n\n👇 Reply *SHOP* to explore`,
 };
 
-// Generic template for any festival
 function genericTemplate(biz, festival, discount) {
   return (
     `${festival.emoji} *${festival.name} Special! ${biz}* ${festival.emoji}\n\n` +
     `Celebrating ${festival.name} with exclusive offers! 🎉\n\n` +
-    `🎁 *${festival.name} Sale — ${discount}% OFF*\n` +
-    `Limited time offer!\n\n` +
+    `🎁 *${festival.name} Sale — ${discount}% OFF*\nLimited time offer!\n\n` +
     `👇 Reply *SHOP* to browse collection`
   );
 }
 
-// ── Get upcoming festivals in the next N days ─────────────────────────────────
+// ── Pure calendar functions (no DB) ──────────────────────────────────────────
 function getUpcoming(daysAhead = 10) {
   const now    = new Date();
   const cutoff = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
-
-  return FESTIVALS.filter(f => {
-    const d = new Date(f.date);
-    return d >= now && d <= cutoff;
-  }).sort((a, b) => new Date(a.date) - new Date(b.date));
+  return FESTIVALS
+    .filter(f => { const d = new Date(f.date); return d >= now && d <= cutoff; })
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
-// ── Get festivals that are within their alert window today ────────────────────
 function getAlertsForToday() {
   const now = new Date();
   return FESTIVALS.filter(f => {
@@ -132,69 +90,54 @@ function getAlertsForToday() {
   });
 }
 
-// ── Generate campaign message ─────────────────────────────────────────────────
 function getCampaignMessage(festivalName, businessName = "our store", discount = 10) {
-  const festival = FESTIVALS.find(f => f.name === festivalName);
+  const festival  = FESTIVALS.find(f => f.name === festivalName);
   if (!festival) return null;
-
   const generator = CAMPAIGN_TEMPLATES[festivalName];
-  if (generator) {
-    // For Raksha Bandhan discount is ₹ amount, not %
-    return generator(businessName, discount);
-  }
-  return genericTemplate(businessName, festival, discount);
+  return generator ? generator(businessName, discount) : genericTemplate(businessName, festival, discount);
 }
 
-// ── Get festival by name ──────────────────────────────────────────────────────
 function getFestival(name) {
   return FESTIVALS.find(f => f.name === name) || null;
 }
 
-// ── Days until a festival ─────────────────────────────────────────────────────
 function daysUntil(festivalName) {
   const festival = FESTIVALS.find(f => f.name === festivalName);
   if (!festival) return null;
-  const diff = new Date(festival.date) - new Date();
-  return Math.max(0, Math.ceil(diff / (24 * 60 * 60 * 1000)));
+  return Math.max(0, Math.ceil((new Date(festival.date) - new Date()) / 86400000));
 }
 
-// ── Log a broadcast so we don't spam the same festival twice ─────────────────
-function logBroadcast(festivalName, sentCount) {
-  const db = loadLog();
-  db[festivalName] = { sentAt: new Date().toISOString(), sentCount };
-  saveLog(db);
-}
-
-function wasAlreadyBroadcast(festivalName) {
-  const db      = loadLog();
-  const entry   = db[festivalName];
-  if (!entry) return false;
-  // Reset if it was sent more than 30 days ago (for recurring festivals)
-  const age = Date.now() - new Date(entry.sentAt).getTime();
-  return age < 30 * 24 * 60 * 60 * 1000;
-}
-
-function loadLog() {
+// ── Broadcast log (DB-backed) ─────────────────────────────────────────────────
+async function logBroadcast(festivalName, sentCount) {
   try {
-    if (fs.existsSync(LOG_FILE)) return JSON.parse(fs.readFileSync(LOG_FILE, "utf8"));
-  } catch {}
-  return {};
+    await db.query(
+      `INSERT INTO festival_broadcasts (festival_name, sent_at, sent_count)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (festival_name) DO UPDATE SET sent_at=$2, sent_count=$3`,
+      [festivalName, new Date().toISOString(), sentCount]
+    );
+  } catch (e) {
+    console.error("[festivals] logBroadcast error:", e.message);
+  }
 }
 
-function saveLog(db) {
+async function wasAlreadyBroadcast(festivalName) {
   try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(LOG_FILE, JSON.stringify(db, null, 2));
-  } catch {}
+    const { rows } = await db.query(
+      `SELECT sent_at FROM festival_broadcasts WHERE festival_name = $1`,
+      [festivalName]
+    );
+    if (!rows.length) return false;
+    const age = Date.now() - new Date(rows[0].sent_at).getTime();
+    return age < 30 * 24 * 60 * 60 * 1000; // reset after 30 days
+  } catch (e) {
+    console.error("[festivals] wasAlreadyBroadcast error:", e.message);
+    return false;
+  }
 }
 
 module.exports = {
   FESTIVALS,
-  getUpcoming,
-  getAlertsForToday,
-  getCampaignMessage,
-  getFestival,
-  daysUntil,
-  logBroadcast,
-  wasAlreadyBroadcast,
+  getUpcoming, getAlertsForToday, getCampaignMessage, getFestival, daysUntil,
+  logBroadcast, wasAlreadyBroadcast,
 };

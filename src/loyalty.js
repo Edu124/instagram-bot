@@ -1,158 +1,149 @@
-// ── Loyalty Points System ─────────────────────────────────────────────────────
+// ── Loyalty Points System — Railway PostgreSQL backed ──────────────────────────
 // Earn  : 1 point per ₹1 spent  (2x for Gold tier)
 // Bonus : 50 pts first order · 100 pts per referral · 25 pts birthday
 // Redeem: 500 pts = ₹50 off (multiples: 1000pts=₹100, 1500pts=₹150 …)
 // Tiers : Bronze (0+) · Silver (2000+ earned) · Gold (5000+ earned)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const fs   = require("fs");
-const path = require("path");
+const db = require("./db");
 
-const DATA_DIR  = path.join(__dirname, "../data");
-const DATA_FILE = path.join(DATA_DIR, "loyalty.json");
+const REDEEM_THRESHOLD = 500;
+const REDEEM_VALUE     = 50;
 
-const REDEEM_THRESHOLD = 500; // points needed per ₹50 discount
-const REDEEM_VALUE     = 50;  // rupees per 500 points
-
-// ── Persistence ───────────────────────────────────────────────────────────────
-function load() {
-  try {
-    if (fs.existsSync(DATA_FILE)) return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-  } catch {}
-  return {};
-}
-
-function save(db) {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
-  } catch (err) {
-    console.error("[loyalty] Save error:", err.message);
-  }
-}
-
-// ── Tier logic ────────────────────────────────────────────────────────────────
+// ── Tier logic (pure — no DB) ─────────────────────────────────────────────────
 function getTier(totalEarned = 0) {
   if (totalEarned >= 5000) return { name: "Gold",   emoji: "🥇", multiplier: 2,   benefit: "2× points on every order" };
   if (totalEarned >= 2000) return { name: "Silver", emoji: "🥈", multiplier: 1.5, benefit: "1.5× points on every order" };
   return                          { name: "Bronze", emoji: "🥉", multiplier: 1,   benefit: "1 point per ₹1 spent" };
 }
 
+// ── Points math (pure — no DB) ────────────────────────────────────────────────
+function calcOrderPoints(orderAmount) {
+  return Math.floor(orderAmount);
+}
+
 // ── Get customer record ───────────────────────────────────────────────────────
-function getRecord(customerId) {
-  const db = load();
-  return db[customerId] || {
-    points       : 0,
-    totalEarned  : 0,
-    totalRedeemed: 0,
-    ordersCount  : 0,
-    history      : [],
-  };
+async function getRecord(customerId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM loyalty_points WHERE customer_id = $1`,
+      [customerId]
+    );
+    if (rows[0]) return _toRecord(rows[0]);
+    return { points: 0, totalEarned: 0, totalRedeemed: 0, ordersCount: 0, history: [] };
+  } catch (e) {
+    console.error("[loyalty] getRecord error:", e.message);
+    return { points: 0, totalEarned: 0, totalRedeemed: 0, ordersCount: 0, history: [] };
+  }
 }
 
 // ── Get current points balance ────────────────────────────────────────────────
-function getPoints(customerId) {
-  return getRecord(customerId).points;
+async function getPoints(customerId) {
+  return (await getRecord(customerId)).points;
 }
 
 // ── Add points ────────────────────────────────────────────────────────────────
-// reason: "purchase" | "first_order" | "referral" | "birthday" | "bonus"
-function addPoints(customerId, rawAmount, reason = "purchase", orderId = null) {
-  const db     = load();
-  const record = db[customerId] || {
-    points: 0, totalEarned: 0, totalRedeemed: 0, ordersCount: 0, history: [],
-  };
+async function addPoints(customerId, rawAmount, reason = "purchase", orderId = null) {
+  try {
+    const record = await getRecord(customerId);
+    const tier   = getTier(record.totalEarned);
+    const amount = reason === "purchase"
+      ? Math.floor(rawAmount * tier.multiplier)
+      : rawAmount;
 
-  // Apply tier multiplier on purchase points
-  const tier   = getTier(record.totalEarned);
-  const amount = reason === "purchase"
-    ? Math.floor(rawAmount * tier.multiplier)
-    : rawAmount;
+    const newPoints        = record.points      + amount;
+    const newTotalEarned   = record.totalEarned + amount;
+    const newOrdersCount   = reason === "purchase" ? record.ordersCount + 1 : record.ordersCount;
 
-  record.points       += amount;
-  record.totalEarned  += amount;
-  if (reason === "purchase") record.ordersCount++;
+    const newHistory = [
+      ...(record.history || []),
+      { type: "earn", amount, reason, orderId: orderId || null, date: new Date().toISOString(), balance: newPoints },
+    ].slice(-50);
 
-  record.history.push({
-    type   : "earn",
-    amount,
-    reason,
-    orderId : orderId || null,
-    date   : new Date().toISOString(),
-    balance: record.points,
-  });
+    await db.query(
+      `INSERT INTO loyalty_points (customer_id, points, total_earned, total_redeemed, orders_count, history)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (customer_id) DO UPDATE SET
+         points       = $2,
+         total_earned = $3,
+         orders_count = $4,
+         history      = $6,
+         updated_at   = NOW()`,
+      [customerId, newPoints, newTotalEarned, newOrdersCount,
+       record.totalRedeemed, JSON.stringify(newHistory)]
+    );
 
-  // Trim history to last 50 entries
-  if (record.history.length > 50) record.history = record.history.slice(-50);
-
-  db[customerId] = record;
-  save(db);
-  return { record, pointsAdded: amount };
+    const updated = { ...record, points: newPoints, totalEarned: newTotalEarned, ordersCount: newOrdersCount, history: newHistory };
+    return { record: updated, pointsAdded: amount };
+  } catch (e) {
+    console.error("[loyalty] addPoints error:", e.message);
+    return { record: await getRecord(customerId), pointsAdded: 0 };
+  }
 }
 
 // ── Redeem points ─────────────────────────────────────────────────────────────
-// Returns { ok, pointsUsed, discountAmount } or { ok: false, reason }
-function redeemPoints(customerId, setsToRedeem = 1) {
-  const db     = load();
-  const record = db[customerId];
-  if (!record) return { ok: false, reason: "No loyalty account found" };
+async function redeemPoints(customerId, setsToRedeem = 1) {
+  try {
+    const record         = await getRecord(customerId);
+    const pointsNeeded   = setsToRedeem * REDEEM_THRESHOLD;
+    const discountAmount = setsToRedeem * REDEEM_VALUE;
 
-  const pointsNeeded    = setsToRedeem * REDEEM_THRESHOLD;
-  const discountAmount  = setsToRedeem * REDEEM_VALUE;
+    if (record.points < pointsNeeded) {
+      return { ok: false, reason: `Need ${pointsNeeded} points for ₹${discountAmount} off. You have ${record.points}.` };
+    }
 
-  if (record.points < pointsNeeded) {
-    return {
-      ok    : false,
-      reason: `Need ${pointsNeeded} points for ₹${discountAmount} off. You have ${record.points}.`,
-    };
+    const newPoints        = record.points        - pointsNeeded;
+    const newTotalRedeemed = record.totalRedeemed + pointsNeeded;
+    const newHistory       = [
+      ...(record.history || []),
+      { type: "redeem", amount: -pointsNeeded, discountAmount, date: new Date().toISOString(), balance: newPoints },
+    ].slice(-50);
+
+    await db.query(
+      `INSERT INTO loyalty_points (customer_id, points, total_earned, total_redeemed, orders_count, history)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (customer_id) DO UPDATE SET
+         points         = $2,
+         total_redeemed = $4,
+         history        = $6,
+         updated_at     = NOW()`,
+      [customerId, newPoints, record.totalEarned, newTotalRedeemed,
+       record.ordersCount, JSON.stringify(newHistory)]
+    );
+
+    return { ok: true, pointsUsed: pointsNeeded, discountAmount };
+  } catch (e) {
+    console.error("[loyalty] redeemPoints error:", e.message);
+    return { ok: false, reason: "Error processing redemption" };
   }
-
-  record.points         -= pointsNeeded;
-  record.totalRedeemed  += pointsNeeded;
-
-  record.history.push({
-    type          : "redeem",
-    amount        : -pointsNeeded,
-    discountAmount,
-    date          : new Date().toISOString(),
-    balance       : record.points,
-  });
-
-  db[customerId] = record;
-  save(db);
-  return { ok: true, pointsUsed: pointsNeeded, discountAmount };
 }
 
 // ── Calculate how much a customer can redeem ──────────────────────────────────
-function getRedeemInfo(customerId) {
-  const points       = getPoints(customerId);
-  const maxSets      = Math.floor(points / REDEEM_THRESHOLD);
-  const maxDiscount  = maxSets * REDEEM_VALUE;
-  const nextMilestone = REDEEM_THRESHOLD - (points % REDEEM_THRESHOLD);
+async function getRedeemInfo(customerId) {
+  const record        = await getRecord(customerId);
+  const points        = record.points;
+  const maxSets       = Math.floor(points / REDEEM_THRESHOLD);
+  const maxDiscount   = maxSets * REDEEM_VALUE;
+  const rem           = points % REDEEM_THRESHOLD;
   return {
     points,
     maxSets,
     maxDiscount,
     canRedeem     : maxSets > 0,
-    nextMilestone : nextMilestone === REDEEM_THRESHOLD ? 0 : nextMilestone,
+    nextMilestone : rem === 0 ? 0 : REDEEM_THRESHOLD - rem,
   };
 }
 
-// ── Points to award for an order amount ──────────────────────────────────────
-function calcOrderPoints(orderAmount) {
-  return Math.floor(orderAmount); // base: 1pt per ₹1 (multiplier applied in addPoints)
+// ── Check if first order ──────────────────────────────────────────────────────
+async function isFirstOrder(customerId) {
+  return (await getRecord(customerId)).ordersCount === 0;
 }
 
-// ── Check if first order (for bonus) ─────────────────────────────────────────
-function isFirstOrder(customerId) {
-  return getRecord(customerId).ordersCount === 0;
-}
-
-// ── Full summary string for WhatsApp message ─────────────────────────────────
-function getSummaryText(customerId, lang = "english") {
-  const record = getRecord(customerId);
+// ── Full summary text ─────────────────────────────────────────────────────────
+async function getSummaryText(customerId, lang = "english") {
+  const record = await getRecord(customerId);
   const tier   = getTier(record.totalEarned);
-  const redeem = getRedeemInfo(customerId);
+  const redeem = await getRedeemInfo(customerId);
 
   const tierLine   = `${tier.emoji} *${tier.name} Member* — ${tier.benefit}`;
   const pointsLine = `⭐ *${record.points} Selly Points*`;
@@ -163,16 +154,20 @@ function getSummaryText(customerId, lang = "english") {
   return `${tierLine}\n${pointsLine}\n${redeemLine}`;
 }
 
+// ── Map DB row → record shape ─────────────────────────────────────────────────
+function _toRecord(row) {
+  return {
+    points       : row.points        || 0,
+    totalEarned  : row.total_earned  || 0,
+    totalRedeemed: row.total_redeemed|| 0,
+    ordersCount  : row.orders_count  || 0,
+    history      : row.history       || [],
+  };
+}
+
 module.exports = {
-  getRecord,
-  getPoints,
-  addPoints,
-  redeemPoints,
-  getRedeemInfo,
-  calcOrderPoints,
-  isFirstOrder,
-  getTier,
-  getSummaryText,
-  REDEEM_THRESHOLD,
-  REDEEM_VALUE,
+  getRecord, getPoints, addPoints, redeemPoints,
+  getRedeemInfo, calcOrderPoints, isFirstOrder,
+  getTier, getSummaryText,
+  REDEEM_THRESHOLD, REDEEM_VALUE,
 };
