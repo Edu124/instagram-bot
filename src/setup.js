@@ -149,18 +149,69 @@ async function setup() {
   // ── business_settings ─────────────────────────────────────────────────────────
   await db.query(`
     CREATE TABLE IF NOT EXISTS business_settings (
-      business_id       TEXT PRIMARY KEY,
-      business_name     TEXT NOT NULL DEFAULT 'My Store',
-      business_gst_no   TEXT NOT NULL DEFAULT '',
-      business_address  TEXT NOT NULL DEFAULT '',
-      gst_enabled       BOOLEAN NOT NULL DEFAULT true,
-      gst_rate          NUMERIC NOT NULL DEFAULT 5,
-      delivery_charge   NUMERIC NOT NULL DEFAULT 49,
-      free_above        NUMERIC NOT NULL DEFAULT 999,
-      cod_fee           NUMERIC NOT NULL DEFAULT 30,
-      updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      business_id          TEXT PRIMARY KEY,
+      business_name        TEXT NOT NULL DEFAULT 'My Store',
+      business_gst_no      TEXT NOT NULL DEFAULT '',
+      business_address     TEXT NOT NULL DEFAULT '',
+      gst_enabled          BOOLEAN NOT NULL DEFAULT true,
+      gst_rate             NUMERIC NOT NULL DEFAULT 5,
+      delivery_charge      NUMERIC NOT NULL DEFAULT 49,
+      free_above           NUMERIC NOT NULL DEFAULT 999,
+      cod_fee              NUMERIC NOT NULL DEFAULT 30,
+      whatsapp_number      TEXT NOT NULL DEFAULT '',
+      shiprocket_email     TEXT NOT NULL DEFAULT '',
+      shiprocket_password  TEXT NOT NULL DEFAULT '',
+      delhivery_api_key    TEXT NOT NULL DEFAULT '',
+      updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  // Add new columns if upgrading existing table
+  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS whatsapp_number     TEXT NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS shiprocket_email    TEXT NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS shiprocket_password TEXT NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS delhivery_api_key   TEXT NOT NULL DEFAULT ''`);
+
+  // ── wishlists ─────────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS wishlists (
+      id           TEXT PRIMARY KEY,
+      customer_id  TEXT NOT NULL,
+      product_id   TEXT NOT NULL,
+      product_name TEXT NOT NULL DEFAULT '',
+      added_at     BIGINT NOT NULL DEFAULT 0,
+      notified     BOOLEAN NOT NULL DEFAULT false
+    )
+  `);
+  await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS wishlists_cid_pid ON wishlists(customer_id, product_id)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS wishlists_pid_idx ON wishlists(product_id)`);
+
+  // ── order_otps ────────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS order_otps (
+      order_id                TEXT PRIMARY KEY,
+      cod_otp                 TEXT,
+      cod_otp_verified        BOOLEAN NOT NULL DEFAULT false,
+      delivery_otp            TEXT,
+      delivery_otp_verified   BOOLEAN NOT NULL DEFAULT false
+    )
+  `);
+
+  // ── photo_inquiries ───────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS photo_inquiries (
+      id            TEXT PRIMARY KEY,
+      customer_id   TEXT NOT NULL,
+      customer_name TEXT NOT NULL DEFAULT '',
+      image_url     TEXT NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'pending',
+      owner_reply   TEXT,
+      product_id    TEXT,
+      created_at    BIGINT NOT NULL DEFAULT 0,
+      replied_at    BIGINT
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS photo_inquiries_status_idx ON photo_inquiries(status)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS photo_inquiries_cid_idx    ON photo_inquiries(customer_id)`);
 
   console.log("[Setup] All tables ready ✓");
 }

@@ -25,11 +25,15 @@ const subscriptions   = require("./subscriptions");
 const commissionEngine = require("./commission");
 
 // ── New feature modules ────────────────────────────────────────────────────────
-const language = require("./language");
-const loyalty  = require("./loyalty");
-const festivals = require("./festivals");
-const bargain  = require("./bargain");
-const status   = require("./status");
+const language     = require("./language");
+const loyalty      = require("./loyalty");
+const festivals    = require("./festivals");
+const bargain      = require("./bargain");
+const status       = require("./status");
+const wishlistMod  = require("./wishlist");
+const otpMod       = require("./otp");
+const photoInquiry = require("./photo_inquiry");
+const trackingMod  = require("./tracking");
 
 // ── Unified send helper ───────────────────────────────────────────────────────
 // All bot replies MUST go through here — easy to swap channel in future
@@ -121,11 +125,11 @@ app.post("/webhook/whatsapp", async (req, res) => {
             continue;
           }
 
-          // ── Image message ─────────────────────────────────────────────────
+          // ── Image message — photo search for customers ────────────────────
           if (msgType === "image") {
-            const imageUrl = msg.image?.url || "";
+            const imageUrl = msg.image?.url || msg.image?.id || "";
             if (imageUrl) {
-              await handleImageUpload(senderId, sess, imageUrl, name);
+              await handlePhotoSearch(senderId, sess, imageUrl, name);
               continue;
             }
           }
@@ -218,11 +222,12 @@ async function routeMessage(customerId, sess, message, name) {
   const lang  = sess.lang || "english";
 
   // ── Global commands (any state) ───────────────────────────────────────────
-  if (isLoyaltyRequest(message)) return handleLoyaltyCheck(customerId, sess);
-  if (isTrackingRequest(message)) return handleTracking(customerId, sess, message);
-  if (isReturnRequest(message))   return handleReturn(customerId, sess, message);
+  if (isLoyaltyRequest(message))    return handleLoyaltyCheck(customerId, sess);
+  if (isTrackingRequest(message))   return handleTracking(customerId, sess, message);
+  if (isReturnRequest(message))     return handleReturn(customerId, sess, message);
   if (isOrderHistoryRequest(message)) return handleOrderHistory(customerId, sess);
-  if (isReferralRequest(message)) return handleReferralCode(customerId);
+  if (isReferralRequest(message))   return handleReferralCode(customerId);
+  if (isWishlistRequest(message))   return handleWishlistCommand(customerId, sess, message);
 
   if (message.toLowerCase() === "cancel" || message.toLowerCase() === "start over" ||
       /^(रद्द|रद्द करो|cancel karo)$/i.test(message)) {
@@ -471,6 +476,34 @@ async function handleProductSelection(customerId, sess, message) {
     if (!product) {
       const invalid = { hindi: "गलत selection। List से number reply करें।", hinglish: "Invalid selection. List se number reply karo.", english: "Invalid selection. Reply a number from the list." };
       return send(customerId, invalid[lang] || invalid.english);
+    }
+
+    // ── Out-of-stock → offer wishlist ──────────────────────────────────────
+    if (product.inStock === false) {
+      const oos = {
+        hindi   : `😕 *${product.name}* abhi out of stock hai.\n\n1️⃣ Wishlist mein add karo (restock hone par notify karein)\n2️⃣ Kuch aur dhundo`,
+        hinglish: `😕 *${product.name}* is currently out of stock.\n\n1️⃣ Add to wishlist — notify me when it's back\n2️⃣ Search something else`,
+        english : `😕 *${product.name}* is currently out of stock.\n\n1️⃣ Add to wishlist (notify me when restocked)\n2️⃣ Search for something else`,
+      };
+      session.update(customerId, { state: "selecting", wishlistPending: product });
+      return send(customerId, oos[lang] || oos.english);
+    }
+
+    // ── Wishlist pending pick ──────────────────────────────────────────────
+    if (sess.wishlistPending) {
+      if (num === 1) {
+        await wishlistMod.add(customerId, sess.wishlistPending.id, sess.wishlistPending.name);
+        const name_ = sess.wishlistPending.name;
+        session.update(customerId, { wishlistPending: null });
+        const added = {
+          hindi   : `❤️ *${name_}* wishlist mein add ho gaya! Restock hone par notify karenge. 🔔`,
+          hinglish: `❤️ *${name_}* added to your wishlist! We'll notify you when it's back. 🔔`,
+          english : `❤️ *${name_}* added to your wishlist! We'll notify you when it's restocked. 🔔`,
+        };
+        return send(customerId, added[lang] || added.english);
+      }
+      session.update(customerId, { wishlistPending: null });
+      return handleSearch(customerId, sess, message, sess.name);
     }
 
     // ── Bargaining check: if customer said "1 for 300" ─────────────────────
@@ -773,6 +806,17 @@ async function confirmOrder(customerId, order, isOnline = true) {
 
   await orders.updateStatus(order.id, "confirmed");
 
+  // ── COD OTP — generate and send to customer ───────────────────────────────
+  let codOtpLine = { hindi: "", hinglish: "", english: "" };
+  if (order.paymentMode === "cod") {
+    const otp = await otpMod.createCodOTP(order.id);
+    codOtpLine = {
+      hindi   : `\n🔐 *Delivery OTP: ${otp}*\n_(Delivery ke time yeh OTP delivery boy ko batana hai)_`,
+      hinglish: `\n🔐 *Delivery OTP: ${otp}*\n_(Share this OTP with the delivery person)_`,
+      english : `\n🔐 *Delivery OTP: ${otp}*\n_(Share this OTP when your order is delivered)_`,
+    };
+  }
+
   // Award loyalty points
   const orderAmount   = order.bill?.total || 0;
   const basePoints      = loyalty.calcOrderPoints(orderAmount);
@@ -792,6 +836,15 @@ async function confirmOrder(customerId, order, isOnline = true) {
   const customer      = await customers.get(customerId);
   const referralCode  = customer?.referralCode || "";
 
+  // WhatsApp handoff line
+  const bizSettings_  = await getSettings(DEFAULT_BUSINESS_ID);
+  const waNum         = (bizSettings_.whatsapp_number || "").replace(/[^0-9]/g, "");
+  const waLine = waNum ? {
+    hindi   : `\n💬 Koi sawaal? Direct chat: wa.me/${waNum}`,
+    hinglish: `\n💬 Need help? Chat with us: wa.me/${waNum}`,
+    english : `\n💬 Questions? Chat with us: wa.me/${waNum}`,
+  } : { hindi: "", hinglish: "", english: "" };
+
   session.reset(customerId);
 
   const codNote  = order.paymentMode === "cod"
@@ -810,36 +863,39 @@ async function confirmOrder(customerId, order, isOnline = true) {
       `Order ID: *#SL${order.id}*\n` +
       `Amount: ₹${order.bill?.total}\n\n` +
       (codNote.hindi ? codNote.hindi + "\n\n" : "") +
-      `⭐ *${totalAwarded} Selly Points earned!*\n` +
+      codOtpLine.hindi +
+      `\n\n⭐ *${totalAwarded} Selly Points earned!*\n` +
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
       `🚚 Tracking updates यहाँ आएंगे।\n` +
       `"track order" reply करें status check करने के लिए।` +
-      refLine.hindi,
+      refLine.hindi + waLine.hindi,
 
     hinglish:
       `✅ *Order Confirm ho gaya!* 🎉\n\n` +
       `Order ID: *#SL${order.id}*\n` +
       `Amount: ₹${order.bill?.total}\n\n` +
       (codNote.hinglish ? codNote.hinglish + "\n\n" : "") +
-      `⭐ *${totalAwarded} Selly Points mile!*\n` +
+      codOtpLine.hinglish +
+      `\n\n⭐ *${totalAwarded} Selly Points mile!*\n` +
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
       `🚚 Tracking updates yahan aayenge.\n` +
       `"track order" reply karo status check karne ke liye.` +
-      refLine.hinglish,
+      refLine.hinglish + waLine.hinglish,
 
     english:
       `✅ *Order Confirmed!* 🎉\n\n` +
       `Order ID: *#SL${order.id}*\n` +
       `Amount: ₹${order.bill?.total}\n\n` +
       (codNote.english ? codNote.english + "\n\n" : "") +
-      `⭐ *${totalAwarded} Selly Points earned!*\n` +
+      codOtpLine.english +
+      `\n\n⭐ *${totalAwarded} Selly Points earned!*\n` +
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
       `🚚 You'll get tracking updates here.\n` +
       `Reply "track order" anytime to check status.` +
-      refLine.english,
+      refLine.english + waLine.english,
   };
 
   await send(customerId, msgs[lang] || msgs.english);
@@ -1014,19 +1070,95 @@ async function handleReferralCode(customerId) {
   );
 }
 
-async function handleImageUpload(customerId, sess, imageUrl, name) {
-  await send(customerId, "✨ Generating content for your product...");
-  const content = await ai.generateProductContent(imageUrl);
-  await send(customerId,
-    `📝 *Caption:*\n${content.caption}\n\n` +
-    `#️⃣ *Hashtags:*\n${content.hashtags}\n\n` +
-    `💰 *Suggested Price:* ₹${content.suggestedPrice}`
-  );
+// ── Photo Search — customer sends image → try catalog match → inquiry if none ──
+async function handlePhotoSearch(customerId, sess, imageUrl, name) {
+  const lang = sess.lang || "english";
+
+  const searching = {
+    hindi   : "🔍 Aapki photo dekh raha hoon, ek second...",
+    hinglish: "🔍 Searching for this product, one moment...",
+    english : "🔍 Searching our catalog for this product...",
+  };
+  await send(customerId, searching[lang] || searching.english);
+
+  try {
+    // Use AI to extract product keywords from image
+    const content = await ai.generateProductContent(imageUrl);
+    const keywords = content.suggestedCategory || content.name ||
+      (content.caption || "").split(" ").slice(0, 4).join(" ");
+
+    if (keywords) {
+      const searchResult = await catalog.search({ product: keywords, rawQuery: keywords });
+      const results      = (searchResult.results || searchResult).filter(p => p.inStock !== false);
+
+      if (results.length) {
+        session.update(customerId, { state: "selecting", searchResults: results });
+        const header = {
+          hindi   : `✅ *${results.length} matching products mile:*\n\n`,
+          hinglish: `✅ *${results.length} similar product${results.length > 1 ? "s" : ""} found:*\n\n`,
+          english : `✅ *${results.length} similar product${results.length > 1 ? "s" : ""} found:*\n\n`,
+        };
+        const list = results.slice(0, 5).map((p, i) =>
+          `${i + 1}️⃣ *${p.name}* — ₹${p.price > 0 ? p.price : "Contact"}\n` +
+          (p.colors?.length ? `   🎨 ${p.colors.slice(0, 3).join(", ")}` : "")
+        ).join("\n\n");
+        const footer = {
+          hindi   : `\n\nNumber reply karo select karne ke liye • "done" checkout ke liye 🛒`,
+          hinglish: `\n\nNumber reply karo • "done" to checkout 🛒`,
+          english : `\n\nReply number to select • "done" to checkout 🛒`,
+        };
+        return send(customerId, (header[lang] || header.english) + list + (footer[lang] || footer.english));
+      }
+    }
+  } catch (e) {
+    console.error("[PhotoSearch] AI error:", e.message);
+  }
+
+  // ── No match found — create inquiry and notify owner ──────────────────────
+  await photoInquiry.create(customerId, imageUrl, name);
+
+  const notFound = {
+    hindi   : `📝 *Aapki request note ho gayi!* 🌟\n\nHamara team jald hi aapko matching products ke baare mein batayega.\nThoda wait karein — hum contact karenge! 🙏`,
+    hinglish: `📝 *We've noted your wish!* 🌟\n\nOur team will review your photo and get back to you with the best matches shortly.\nThank you for your patience! 😊`,
+    english : `📝 *Your request has been noted!* 🌟\n\nOur team will review your photo and get back to you with matching products shortly.\nThank you! 😊`,
+  };
+  return send(customerId, notFound[lang] || notFound.english);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
+function isWishlistRequest(msg) {
+  const m = msg.toLowerCase();
+  return m.includes("wishlist") || m.includes("wish list") || m.includes("meri list") ||
+         m.includes("saved items") || m.includes("my wishlist");
+}
+
+async function handleWishlistCommand(customerId, sess, message) {
+  const lang  = sess.lang || "english";
+  const items = await wishlistMod.getByCustomer(customerId);
+
+  if (!items.length) {
+    const empty = {
+      hindi   : `❤️ Aapki wishlist empty hai!\n\nKoi out-of-stock product dekhne par "1" reply karo wishlist mein add karne ke liye.`,
+      hinglish: `❤️ Your wishlist is empty!\n\nWhen you see an out-of-stock product, reply "1" to add it and we'll notify you when it's back!`,
+      english : `❤️ Your wishlist is empty!\n\nWhen you find an out-of-stock product, reply "1" to add it — we'll notify you when it's restocked!`,
+    };
+    return send(customerId, empty[lang] || empty.english);
+  }
+
+  const list = items.map((w, i) =>
+    `${i + 1}. ${w.product_name || "Product"}${w.notified ? " ✅" : " ⏳"}`
+  ).join("\n");
+
+  const header = {
+    hindi   : `❤️ *Aapki Wishlist (${items.length} items):*\n\n${list}\n\n⏳ = waiting  ✅ = notified`,
+    hinglish: `❤️ *Your Wishlist (${items.length} item${items.length > 1 ? "s" : ""}):*\n\n${list}\n\n⏳ = waiting for restock  ✅ = you were notified`,
+    english : `❤️ *Your Wishlist (${items.length} item${items.length > 1 ? "s" : ""}):*\n\n${list}\n\n⏳ = waiting for restock  ✅ = notified`,
+  };
+  return send(customerId, header[lang] || header.english);
+}
+
 function isLoyaltyRequest(msg) {
   const m = msg.toLowerCase();
   return m.includes("points") || m.includes("loyalty") || m.includes("reward") ||
@@ -1103,10 +1235,21 @@ app.post("/api/orders/:id/status", async (req, res) => {
   const msgs = {
     packed          : "📦 Great news! Your order is packed and ready to ship.",
     shipped         : `🚚 Your order is on the way!${trackingNumber ? ` Tracking: ${trackingNumber}` : ""}`,
-    out_for_delivery: "🛵 Out for delivery today! Please be available.",
     delivered       : "✅ Delivered! Hope you love it 😊\nReply ⭐⭐⭐⭐⭐ to rate your experience.",
   };
-  if (msgs[newStatus]) wa.send(updated.customerId, msgs[newStatus]).catch(() => {});
+
+  // ── Out for delivery → generate delivery OTP ──────────────────────────────
+  if (newStatus === "out_for_delivery") {
+    const otp = await otpMod.createDeliveryOTP(req.params.id);
+    wa.send(updated.customerId,
+      `🛵 *Out for Delivery!*\n\nYour order is arriving today!\n\n` +
+      `🔐 *Delivery OTP: ${otp}*\n` +
+      `_(Share this with the delivery person to confirm receipt)_`
+    ).catch(() => {});
+  } else if (msgs[newStatus]) {
+    wa.send(updated.customerId, msgs[newStatus]).catch(() => {});
+  }
+
   if (newStatus === "delivered") scheduleReviewRequest(updated.customerId, updated.id, updated.name);
   res.json({ ok: true, order: updated });
 });
@@ -1135,7 +1278,27 @@ app.post  ("/api/catalog/stock",  async (req, res) => {
     const { id, inStock } = req.body;
     if (!id) return res.status(400).json({ error: "id required" });
     const p = await catalog.toggleStock(id, inStock);
-    p ? res.json({ ok: true, p }) : res.status(404).json({ error: "Not found" });
+    if (!p) return res.status(404).json({ error: "Not found" });
+
+    // ── Restock alerts — notify everyone who wishlisted this product ─────
+    let restockNotified = 0;
+    if (inStock === true || inStock === "true") {
+      const wishers = await wishlistMod.getByProduct(id);
+      for (const w of wishers) {
+        try {
+          await wa.send(w.customer_id,
+            `🎉 *Back in Stock!*\n\n` +
+            `*${w.product_name || p.name}* is now available!\n\n` +
+            `Reply "${w.product_name || p.name}" to order now 🛍️`
+          );
+          await wishlistMod.markNotified(w.customer_id, id);
+          restockNotified++;
+        } catch {}
+      }
+      if (restockNotified) console.log(`[Restock] Notified ${restockNotified} wishlist customers for product ${id}`);
+    }
+
+    res.json({ ok: true, p, restockNotified });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post  ("/api/catalog/upload", (req, res) => {
@@ -1282,6 +1445,146 @@ app.post("/api/promote/abandoned", async (req, res) => {
   res.json({ ok: true, sent: recovered });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WISHLIST APIs
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/api/wishlist/:customerId", async (req, res) => {
+  try {
+    const items = await wishlistMod.getByCustomer(req.params.customerId);
+    res.json({ items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OTP APIs
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/api/orders/:id/otp", async (req, res) => {
+  try {
+    const otps = await otpMod.getOTPs(req.params.id);
+    res.json({ otps });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/orders/:id/verify-otp", async (req, res) => {
+  const { otp, type = "delivery" } = req.body;
+  try {
+    const ok = type === "cod"
+      ? await otpMod.verifyCodOTP(req.params.id, otp)
+      : await otpMod.verifyDeliveryOTP(req.params.id, otp);
+    res.json({ ok, verified: ok });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHOTO INQUIRY APIs
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/api/inquiries", async (req, res) => {
+  try {
+    const pending = req.query.pending === "true";
+    const items   = pending
+      ? await photoInquiry.getPending()
+      : await photoInquiry.getAll();
+    res.json({ inquiries: items, pending: items.filter(i => i.status === "pending").length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/inquiries/:id/reply", async (req, res) => {
+  const { reply: ownerReply, productId } = req.body;
+  if (!ownerReply) return res.status(400).json({ error: "reply required" });
+  try {
+    const inquiry = await photoInquiry.reply(req.params.id, ownerReply, productId || null);
+    if (!inquiry) return res.status(404).json({ error: "Inquiry not found" });
+    // Send WA DM to customer with owner's reply
+    const replyMsg = productId
+      ? `✨ *We found something for you!*\n\n${ownerReply}\n\nReply "${ownerReply.split(" ")[0]}" to order!`
+      : `✨ *Update from our team:*\n\n${ownerReply}`;
+    wa.send(inquiry.customer_id, replyMsg).catch(() => {});
+    res.json({ ok: true, inquiry });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRACKING API
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/api/tracking/:awb", async (req, res) => {
+  const { awb } = req.params;
+  const carrier = req.query.carrier || "shiprocket";
+  try {
+    const settings = await getSettings(DEFAULT_BUSINESS_ID);
+    const result   = await trackingMod.track(awb, carrier, {
+      shiprocketEmail   : settings.shiprocket_email,
+      shiprocketPassword: settings.shiprocket_password,
+      delhiveryApiKey   : settings.delhivery_api_key,
+    });
+    if (!result) return res.status(404).json({ error: "Tracking data not found. Check AWB and carrier credentials." });
+
+    // Auto-advance order status based on carrier status
+    const orderId = req.query.orderId;
+    if (orderId) {
+      const mapped = trackingMod.mapStatus(result.statusText);
+      if (mapped) await orders.updateStatus(orderId, mapped).catch(() => {});
+    }
+
+    res.json({ ok: true, tracking: result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEGMENT BROADCAST
+// ─────────────────────────────────────────────────────────────────────────────
+app.post("/api/promote/segment", async (req, res) => {
+  const { segment = "all", message, productIds = [] } = req.body;
+  if (!message) return res.status(400).json({ error: "message required" });
+
+  const { customers: allCustomers = [] } = await customers.getAll();
+  const now = Date.now();
+  const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+  const SIXTY_DAYS  = 60 * 24 * 60 * 60 * 1000;
+
+  let targets;
+  switch (segment) {
+    case "vip":
+      targets = allCustomers.filter(c => (c.totalSpend || 0) >= 5000);
+      break;
+    case "new":
+      targets = allCustomers.filter(c => (now - (c.firstSeenAt || 0)) < THIRTY_DAYS);
+      break;
+    case "inactive":
+      targets = allCustomers.filter(c => (now - (c.lastActiveAt || 0)) > SIXTY_DAYS);
+      break;
+    case "repeat":
+      targets = allCustomers.filter(c => (c.totalOrders || 0) >= 2);
+      break;
+    default:
+      targets = allCustomers;
+  }
+
+  // Build product block
+  let productBlock = "";
+  if (productIds.length > 0) {
+    const prods = await Promise.all(productIds.map(id => catalog.get(id)));
+    const lines  = prods.filter(Boolean).map(p =>
+      `• *${p.name}* — ₹${p.price > 0 ? p.price.toLocaleString("en-IN") : "Contact"}` +
+      (p.sizes?.length  ? ` | ${p.sizes.join(", ")}`  : "") +
+      (p.colors?.length ? ` | ${p.colors.join(", ")}` : "")
+    );
+    if (lines.length) productBlock = `\n\n🛍️ *Featured:*\n${lines.join("\n")}`;
+  }
+
+  const fullMsg = message + productBlock + "\n\nReply with a product name to order! 👇";
+  let sent = 0;
+  for (const c of targets) {
+    try {
+      await wa.send(c.id, fullMsg);
+      session.update(c.id, { promoSource: "segment_" + segment, promoSentAt: now });
+      sent++;
+    } catch {}
+  }
+
+  console.log(`[Segment] ${segment} broadcast sent to ${sent}/${targets.length}`);
+  res.json({ ok: true, sent, total: targets.length, segment });
+});
+
 // ── Business Settings ─────────────────────────────────────────────────────────
 // In-memory cache so every order doesn't hit the DB
 const db = require("./db");
@@ -1310,19 +1613,24 @@ app.post("/api/settings", async (req, res) => {
   const {
     business_name, business_gst_no, business_address,
     gst_enabled, gst_rate, delivery_charge, free_above, cod_fee,
+    whatsapp_number, shiprocket_email, shiprocket_password, delhivery_api_key,
   } = req.body;
 
   const fields = [];
   const vals   = [];
   let i = 1;
-  if (business_name     !== undefined) { fields.push(`business_name=$${i++}`);    vals.push(business_name); }
-  if (business_gst_no   !== undefined) { fields.push(`business_gst_no=$${i++}`);  vals.push(business_gst_no); }
-  if (business_address  !== undefined) { fields.push(`business_address=$${i++}`); vals.push(business_address); }
-  if (gst_enabled       !== undefined) { fields.push(`gst_enabled=$${i++}`);      vals.push(gst_enabled); }
-  if (gst_rate          !== undefined) { fields.push(`gst_rate=$${i++}`);         vals.push(Number(gst_rate)); }
-  if (delivery_charge   !== undefined) { fields.push(`delivery_charge=$${i++}`);  vals.push(Number(delivery_charge)); }
-  if (free_above        !== undefined) { fields.push(`free_above=$${i++}`);       vals.push(Number(free_above)); }
-  if (cod_fee           !== undefined) { fields.push(`cod_fee=$${i++}`);          vals.push(Number(cod_fee)); }
+  if (business_name       !== undefined) { fields.push(`business_name=$${i++}`);       vals.push(business_name); }
+  if (business_gst_no     !== undefined) { fields.push(`business_gst_no=$${i++}`);     vals.push(business_gst_no); }
+  if (business_address    !== undefined) { fields.push(`business_address=$${i++}`);    vals.push(business_address); }
+  if (gst_enabled         !== undefined) { fields.push(`gst_enabled=$${i++}`);         vals.push(gst_enabled); }
+  if (gst_rate            !== undefined) { fields.push(`gst_rate=$${i++}`);            vals.push(Number(gst_rate)); }
+  if (delivery_charge     !== undefined) { fields.push(`delivery_charge=$${i++}`);     vals.push(Number(delivery_charge)); }
+  if (free_above          !== undefined) { fields.push(`free_above=$${i++}`);          vals.push(Number(free_above)); }
+  if (cod_fee             !== undefined) { fields.push(`cod_fee=$${i++}`);             vals.push(Number(cod_fee)); }
+  if (whatsapp_number     !== undefined) { fields.push(`whatsapp_number=$${i++}`);     vals.push(whatsapp_number); }
+  if (shiprocket_email    !== undefined) { fields.push(`shiprocket_email=$${i++}`);    vals.push(shiprocket_email); }
+  if (shiprocket_password !== undefined) { fields.push(`shiprocket_password=$${i++}`); vals.push(shiprocket_password); }
+  if (delhivery_api_key   !== undefined) { fields.push(`delhivery_api_key=$${i++}`);   vals.push(delhivery_api_key); }
 
   if (!fields.length) return res.status(400).json({ error: "No fields to update" });
   fields.push(`updated_at=NOW()`);
