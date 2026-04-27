@@ -1908,8 +1908,7 @@ async function checkFestivalBroadcasts() {
     }
   }
 }
-setInterval(checkFestivalBroadcasts, 6 * 60 * 60 * 1000);
-checkFestivalBroadcasts(); // run once on startup
+setInterval(() => checkFestivalBroadcasts().catch(e => console.error("[festivals] check failed:", e.message)), 6 * 60 * 60 * 1000);
 
 // Review request (24h after delivery)
 function scheduleReviewRequest(customerId, orderId, customerName) {
@@ -2002,6 +2001,20 @@ async function saveProduct(businessId, sess) {
   );
 }
 
+// ── Global error guards — prevent crashes from unhandled rejections ───────────
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT EXCEPTION]", err.message, err.stack);
+  // Don't exit — keep server running
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[UNHANDLED REJECTION]", reason);
+  // Don't exit — keep server running
+});
+process.on("SIGTERM", () => {
+  console.log("[Selly Bot] SIGTERM received — shutting down gracefully");
+  process.exit(0);
+});
+
 // ── Start server ──────────────────────────────────────────────────────────────
 setup()
   .then(() => {
@@ -2009,6 +2022,8 @@ setup()
       console.log(`[Selly Bot] Running on port ${PORT} 🚀`);
       console.log(`[Selly Bot] Features: multi-language · status-reply · loyalty · bargaining · festivals · COD+Razorpay`);
     });
+    // Run startup tasks safely — never crash the server
+    checkFestivalBroadcasts().catch(e => console.error("[festivals] startup check failed:", e.message));
   })
   .catch(err => {
     console.error("[Selly Bot] DB setup failed:", err.message);
