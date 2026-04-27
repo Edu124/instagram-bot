@@ -1651,25 +1651,32 @@ app.post("/api/settings", async (req, res) => {
 });
 
 // ── Billing & Subscription APIs ───────────────────────────────────────────────
+// bid helper — reads from header (X-Business-ID), query param (bid), or falls back to default
+function getBid(req) {
+  return req.headers["x-business-id"] || req.query.bid || req.query.businessId || DEFAULT_BUSINESS_ID;
+}
+
 app.get("/api/billing/summary", async (req, res) => {
-  const bid     = req.query.businessId || DEFAULT_BUSINESS_ID;
+  const bid     = getBid(req);
   const sub     = await subscriptions.get(bid);
   const billing = await commissionEngine.getMonthlySummary(bid, sub.monthlyFee);
   const [days, active] = await Promise.all([subscriptions.daysRemaining(bid), subscriptions.isActive(bid)]);
   res.json({ subscription: { status: sub.status, plan: sub.plan, monthlyFee: sub.monthlyFee, daysRemaining: days, isActive: active }, billing });
 });
 app.get("/api/billing/commissions", async (req, res) => {
-  res.json({ commissions: await commissionEngine.getAll({ businessId: req.query.businessId || DEFAULT_BUSINESS_ID, month: req.query.month }) });
+  const bid = getBid(req);
+  res.json({ commissions: await commissionEngine.getAll({ businessId: bid, month: req.query.month }) });
 });
 app.get("/api/billing/subscription", async (req, res) => {
-  const bid  = req.query.businessId || DEFAULT_BUSINESS_ID;
+  const bid  = getBid(req);
   const sub  = await subscriptions.get(bid);
   const [active, days] = await Promise.all([subscriptions.isActive(bid), subscriptions.daysRemaining(bid)]);
   res.json({ ...sub, isActive: active, daysRemaining: days });
 });
 app.post("/api/billing/payment", async (req, res) => {
-  const { businessId = DEFAULT_BUSINESS_ID, amount, paymentId, method } = req.body;
-  res.json({ ok: true, subscription: await subscriptions.recordPayment(businessId, { amount, paymentId, method }) });
+  const bid = getBid(req);
+  const { amount, paymentId, method } = req.body;
+  res.json({ ok: true, subscription: await subscriptions.recordPayment(bid, { amount, paymentId, method }) });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
