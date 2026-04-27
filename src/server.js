@@ -8,6 +8,9 @@ const express    = require("express");
 const bodyParser = require("body-parser");
 const path       = require("path");
 
+// ── DB setup ──────────────────────────────────────────────────────────────────
+const { setup } = require("./setup");
+
 // ── Core modules ───────────────────────────────────────────────────────────────
 const session    = require("./session");
 const wa         = require("./whatsapp");   // Primary sender — WhatsApp only
@@ -1432,9 +1435,16 @@ async function saveProduct(businessId, sess) {
 }
 
 // ── Start server ──────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`[Selly Bot] Running on port ${PORT} 🚀`);
-  console.log(`[Selly Bot] Features: multi-language · status-reply · loyalty · bargaining · festivals · COD+Razorpay`);
-});
+setup()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`[Selly Bot] Running on port ${PORT} 🚀`);
+      console.log(`[Selly Bot] Features: multi-language · status-reply · loyalty · bargaining · festivals · COD+Razorpay`);
+    });
+  })
+  .catch(err => {
+    console.error("[Selly Bot] DB setup failed:", err.message);
+    process.exit(1);
+  });
 
 module.exports = app;
