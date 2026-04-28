@@ -64,7 +64,7 @@ app.use((req, res, next) => {
       origin.includes("railway.app") || origin.includes("vercel.app")) {
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Business-ID,x-admin-token");
   }
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -72,6 +72,15 @@ app.use((req, res, next) => {
 
 app.use(bodyParser.json());
 app.use(bodyParser.text({ type: "text/plain", limit: "10mb" }));
+
+// ── Request logger — logs every incoming API call ─────────────────────────────
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/") || req.path.startsWith("/webhook/")) {
+    const bid = req.headers["x-business-id"] || req.query.bid || "-";
+    console.log(`[REQ] ${req.method} ${req.path} bid=${bid} ip=${req.ip}`);
+  }
+  next();
+});
 app.use(express.static(path.join(__dirname, "../public")));
 
 // ── Health check ───────────────────────────────────────────────────────────────
