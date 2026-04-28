@@ -39,9 +39,14 @@ const waNumbers    = require("./wa_numbers");  // multi-tenant phone routing
 // ── Unified send helper ───────────────────────────────────────────────────────
 // Reads per-client phoneId + token from session (set during webhook routing).
 // Falls back to env vars for dev/single-tenant mode.
+const DEFAULT_PHONE_ID = process.env.WHATSAPP_PHONE_ID || "";
+const DEFAULT_WA_TOKEN = process.env.WHATSAPP_TOKEN    || "";
 function _waCtx(to) {
   const s = session.get(to);
-  return { phoneId: s?.phoneId || "", token: s?.waToken || "" };
+  return {
+    phoneId: s?.phoneId || DEFAULT_PHONE_ID,
+    token  : s?.waToken || DEFAULT_WA_TOKEN,
+  };
 }
 async function send(to, text)                 { const c = _waCtx(to); return wa.send(to, text, c.phoneId, c.token); }
 async function sendCards(to, products)        { const c = _waCtx(to); return wa.sendProductCards(to, products, c.phoneId, c.token); }
