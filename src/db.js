@@ -2,7 +2,8 @@
 const { Pool } = require("pg");
 
 const pool = new Pool({
-  connectionString    : process.env.DATABASE_URL,   // always use Railway-injected URL
+  connectionString    : process.env.DATABASE_URL ||
+    "postgresql://postgres:peBFQugIlaGIWtmUCmUoTcYbdZXBwdkH@shinkansen.proxy.rlwy.net:37446/railway",
   ssl                 : { rejectUnauthorized: false },
   max                 : 10,
   idleTimeoutMillis   : 30000,   // close idle connections after 30s
