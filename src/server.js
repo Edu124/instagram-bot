@@ -1226,21 +1226,23 @@ function getStatusEmoji(s) {
 
 app.get ("/api/orders",         async (req, res) => {
   try {
+    const bid = getBid(req);
     const [stats, result] = await Promise.all([
-      orders.getStats(),
-      orders.getAll({ status: req.query.status, page: Number(req.query.page) || 1 }),
+      orders.getStats(bid),
+      orders.getAll({ status: req.query.status, page: Number(req.query.page) || 1, businessId: bid }),
     ]);
     res.json({ stats, ...result });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get ("/api/stats",          async (req, res) => {
-  try { res.json(await orders.getStats()); } catch (e) { res.status(500).json({ error: e.message }); }
+  try { res.json(await orders.getStats(getBid(req))); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get ("/api/customers",      async (req, res) => {
   try {
+    const bid = getBid(req);
     const [stats, result] = await Promise.all([
-      customers.getStats(),
-      customers.getAll({ tag: req.query.tag, page: Number(req.query.page) || 1 }),
+      customers.getStats(bid),
+      customers.getAll({ tag: req.query.tag, page: Number(req.query.page) || 1, businessId: bid }),
     ]);
     res.json({ stats, ...result });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1288,20 +1290,20 @@ app.post("/api/orders/:id/status", async (req, res) => {
 
 // ── Catalog APIs ──────────────────────────────────────────────────────────────
 app.get   ("/api/catalog",        async (req, res) => {
-  try { res.json({ products: await catalog.getAll() }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try { res.json({ products: await catalog.getAll(getBid(req)) }); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post  ("/api/catalog/add",    async (req, res) => {
-  try { res.json({ ok: true, product: await catalog.addProduct(req.body) }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try { res.json({ ok: true, product: await catalog.addProduct(req.body, getBid(req)) }); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.put   ("/api/catalog/:id",    async (req, res) => {
   try {
-    const p = await catalog.update(req.params.id, req.body);
+    const p = await catalog.update(req.params.id, req.body, getBid(req));
     p ? res.json({ ok: true, p }) : res.status(404).json({ error: "Not found" });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.delete("/api/catalog/:id",    async (req, res) => {
   try {
-    const d = await catalog.deleteProduct(req.params.id);
+    const d = await catalog.deleteProduct(req.params.id, getBid(req));
     d ? res.json({ ok: true }) : res.status(404).json({ error: "Not found" });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -2021,18 +2023,29 @@ process.on("SIGTERM", () => {
 });
 
 // ── Start server ──────────────────────────────────────────────────────────────
-setup()
-  .then(() => {
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`[Selly Bot] Running on port ${PORT} 🚀`);
-      console.log(`[Selly Bot] Features: multi-language · status-reply · loyalty · bargaining · festivals · COD+Razorpay`);
-    });
-    // Run startup tasks safely — never crash the server
+// Start server immediately — don't wait for DB setup to bind the port
+// This ensures Railway health checks pass and the process stays alive
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`[Selly Bot] Running on port ${PORT} 🚀`);
+  console.log(`[Selly Bot] Features: multi-language · status-reply · loyalty · bargaining · festivals · COD+Razorpay`);
+});
+
+// DB setup with auto-retry — if DB is slow to start, retry every 5s
+async function setupWithRetry(attempts = 0) {
+  try {
+    await setup();
+    console.log("[Selly Bot] DB ready ✓");
     checkFestivalBroadcasts().catch(e => console.error("[festivals] startup check failed:", e.message));
-  })
-  .catch(err => {
-    console.error("[Selly Bot] DB setup failed:", err.message);
-    process.exit(1);
-  });
+  } catch (err) {
+    console.error(`[Selly Bot] DB setup failed (attempt ${attempts + 1}):`, err.message);
+    if (attempts < 5) {
+      console.log(`[Selly Bot] Retrying DB setup in 5s...`);
+      setTimeout(() => setupWithRetry(attempts + 1), 5000);
+    } else {
+      console.error("[Selly Bot] DB setup gave up after 5 attempts — server running without DB");
+    }
+  }
+}
+setupWithRetry();
 
 module.exports = app;
