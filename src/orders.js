@@ -1,13 +1,13 @@
-// ── Order Manager — Railway PostgreSQL backed ──────────────────────────────────
-const db = require("./db");
+// ── Order Manager — Supabase backed ──────────────────────────────────────────
+const { supabaseAdmin } = require("./supabase");
 
 const DEFAULT_BID = process.env.BUSINESS_ID || "default";
 
 // ── Create order ──────────────────────────────────────────────────────────────
-async function create(data) {
+async function create(data, businessId = DEFAULT_BID) {
   const row = {
     id             : Date.now().toString(),
-    business_id    : DEFAULT_BID,
+    business_id    : businessId,
     customer_id    : data.customerId    || null,
     name           : data.name          || "",
     cart           : data.cart          || [],
@@ -26,22 +26,13 @@ async function create(data) {
   };
 
   try {
-    const { rows } = await db.query(
-      `INSERT INTO orders
-         (id, business_id, customer_id, name, cart, address, mobile, bill,
-          pay_link, payment_mode, status, status_dates, tracking_number,
-          tracking_url, source, promo_source, commission)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-       RETURNING *`,
-      [
-        row.id, row.business_id, row.customer_id, row.name,
-        JSON.stringify(row.cart), row.address, row.mobile, JSON.stringify(row.bill),
-        row.pay_link, row.payment_mode, row.status, JSON.stringify(row.status_dates),
-        row.tracking_number, row.tracking_url, row.source,
-        row.promo_source, row.commission,
-      ]
-    );
-    return _toOrder(rows[0]);
+    const { data: result, error } = await supabaseAdmin
+      .from("orders")
+      .insert(row)
+      .select()
+      .single();
+    if (error) throw error;
+    return _toOrder(result);
   } catch (e) {
     console.error("[Orders] create error:", e.message);
     return _toOrder(row);
@@ -51,11 +42,13 @@ async function create(data) {
 // ── Get order by ID ───────────────────────────────────────────────────────────
 async function get(orderId) {
   try {
-    const { rows } = await db.query(
-      `SELECT * FROM orders WHERE id = $1`,
-      [String(orderId)]
-    );
-    return rows[0] ? _toOrder(rows[0]) : null;
+    const { data, error } = await supabaseAdmin
+      .from("orders")
+      .select("*")
+      .eq("id", String(orderId))
+      .single();
+    if (error) return null;
+    return _toOrder(data);
   } catch (e) {
     console.error("[Orders] get error:", e.message);
     return null;
@@ -65,11 +58,13 @@ async function get(orderId) {
 // ── Get all orders for a customer ─────────────────────────────────────────────
 async function getByCustomer(customerId) {
   try {
-    const { rows } = await db.query(
-      `SELECT * FROM orders WHERE customer_id = $1 ORDER BY created_at DESC`,
-      [customerId]
-    );
-    return rows.map(_toOrder);
+    const { data, error } = await supabaseAdmin
+      .from("orders")
+      .select("*")
+      .eq("customer_id", customerId)
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    return (data || []).map(_toOrder);
   } catch (e) {
     console.error("[Orders] getByCustomer error:", e.message);
     return [];
@@ -77,27 +72,20 @@ async function getByCustomer(customerId) {
 }
 
 // ── Get all orders (for business dashboard) ───────────────────────────────────
-async function getAll({ status, page = 1, limit = 20 } = {}) {
+async function getAll({ status, page = 1, limit = 20, businessId = DEFAULT_BID } = {}) {
   try {
-    const vals = [DEFAULT_BID, limit, (page - 1) * limit];
-    let where  = `WHERE business_id = $1`;
-    if (status) { where += ` AND status = $4`; vals.push(status); }
+    let query = supabaseAdmin
+      .from("orders")
+      .select("*", { count: "exact" })
+      .eq("business_id", businessId)
+      .order("created_at", { ascending: false })
+      .range((page - 1) * limit, page * limit - 1);
 
-    const { rows } = await db.query(
-      `SELECT * FROM orders ${where} ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
-      vals
-    );
+    if (status) query = query.eq("status", status);
 
-    // Total count
-    const cVals = [DEFAULT_BID];
-    let   cWhere = `WHERE business_id = $1`;
-    if (status) { cWhere += ` AND status = $2`; cVals.push(status); }
-    const { rows: cnt } = await db.query(
-      `SELECT COUNT(*)::int AS total FROM orders ${cWhere}`,
-      cVals
-    );
-
-    return { orders: rows.map(_toOrder), total: cnt[0]?.total || 0, page };
+    const { data, error, count } = await query;
+    if (error) throw error;
+    return { orders: (data || []).map(_toOrder), total: count || 0, page };
   } catch (e) {
     console.error("[Orders] getAll error:", e.message);
     return { orders: [], total: 0, page };
@@ -109,25 +97,20 @@ async function updateStatus(orderId, status, extra = {}) {
   const existing = await get(orderId);
   if (!existing) return null;
 
-  const statusDates = {
-    ...(existing.statusDates || {}),
-    [status]: new Date().toLocaleDateString("en-IN"),
-  };
+  const statusDates = { ...(existing.statusDates || {}), [status]: new Date().toLocaleDateString("en-IN") };
+  const updates = { status, status_dates: statusDates, updated_at: new Date().toISOString() };
+  if (extra.trackingNumber) updates.tracking_number = extra.trackingNumber;
+  if (extra.trackingUrl)    updates.tracking_url    = extra.trackingUrl;
 
-  const sets = [`status=$1`, `status_dates=$2`, `updated_at=NOW()`];
-  const vals = [status, JSON.stringify(statusDates)];
-  let i = 3;
-
-  if (extra.trackingNumber) { sets.push(`tracking_number=$${i++}`); vals.push(extra.trackingNumber); }
-  if (extra.trackingUrl)    { sets.push(`tracking_url=$${i++}`);    vals.push(extra.trackingUrl); }
-
-  vals.push(String(orderId));
   try {
-    const { rows } = await db.query(
-      `UPDATE orders SET ${sets.join(", ")} WHERE id=$${i} RETURNING *`,
-      vals
-    );
-    return rows[0] ? _toOrder(rows[0]) : null;
+    const { data, error } = await supabaseAdmin
+      .from("orders")
+      .update(updates)
+      .eq("id", String(orderId))
+      .select()
+      .single();
+    if (error) throw error;
+    return _toOrder(data);
   } catch (e) {
     console.error("[Orders] updateStatus error:", e.message);
     return null;
@@ -137,11 +120,14 @@ async function updateStatus(orderId, status, extra = {}) {
 // ── Set payment link on an order ──────────────────────────────────────────────
 async function updatePayLink(orderId, payLink) {
   try {
-    const { rows } = await db.query(
-      `UPDATE orders SET pay_link=$1, updated_at=NOW() WHERE id=$2 RETURNING *`,
-      [payLink, String(orderId)]
-    );
-    return rows[0] ? _toOrder(rows[0]) : null;
+    const { data, error } = await supabaseAdmin
+      .from("orders")
+      .update({ pay_link: payLink, updated_at: new Date().toISOString() })
+      .eq("id", String(orderId))
+      .select()
+      .single();
+    if (error) throw error;
+    return _toOrder(data);
   } catch (e) {
     console.error("[Orders] updatePayLink error:", e.message);
     return null;
@@ -154,14 +140,15 @@ async function updateTracking(orderId, trackingNumber, trackingUrl) {
 }
 
 // ── Get stats for dashboard ───────────────────────────────────────────────────
-async function getStats() {
+async function getStats(businessId = DEFAULT_BID) {
   const today = new Date().toDateString();
   try {
-    const { rows } = await db.query(
-      `SELECT * FROM orders WHERE business_id = $1`,
-      [DEFAULT_BID]
-    );
-    const all = rows.map(_toOrder);
+    const { data, error } = await supabaseAdmin
+      .from("orders")
+      .select("*")
+      .eq("business_id", businessId);
+    if (error) throw error;
+    const all = (data || []).map(_toOrder);
     return {
       total        : all.length,
       pending      : all.filter(o => o.status === "pending_payment").length,

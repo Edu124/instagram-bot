@@ -765,6 +765,8 @@ async function placeOrder(customerId, sess, paymentMode) {
 
   const commResult  = commissionEngine.calculate(sess.cart, promoSource);
 
+  const bizId = sess.businessId || DEFAULT_BUSINESS_ID;
+
   const order = await orders.create({
     customerId,
     name       : sess.name,
@@ -776,14 +778,14 @@ async function placeOrder(customerId, sess, paymentMode) {
     status     : paymentMode === "cod" ? "confirmed" : "pending_payment",
     promoSource,
     commission : commResult.commissionAmount || 0,
-  });
+  }, bizId);
 
   if (commResult.eligible) {
-    await commissionEngine.record(DEFAULT_BUSINESS_ID, order.id, sess.cart, promoSource);
+    await commissionEngine.record(bizId, order.id, sess.cart, promoSource);
   }
   session.update(customerId, { promoSource: null, promoSentAt: null, loyaltyDiscount: 0 });
-  await customers.touch(customerId, { name: sess.name, mobile: sess.mobile });
-  await customers.recordOrder(customerId, order);
+  await customers.touch(customerId, { name: sess.name, mobile: sess.mobile }, bizId);
+  await customers.recordOrder(customerId, order, bizId);
   session.update(customerId, { currentOrderId: order.id });
 
   // ── Build order summary ────────────────────────────────────────────────────

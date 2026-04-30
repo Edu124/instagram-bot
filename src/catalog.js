@@ -1,43 +1,36 @@
-// ── Product Catalog — Railway PostgreSQL backed ────────────────────────────────
-const db = require("./db");
+// ── Product Catalog — Supabase backed ────────────────────────────────────────
+const { supabaseAdmin } = require("./supabase");
 
 const DEFAULT_BID = process.env.BUSINESS_ID || "default";
 
 // ── Add single product ────────────────────────────────────────────────────────
 async function addProduct(product, businessId = DEFAULT_BID) {
   const row = {
-    id            : Date.now().toString(),
-    business_id   : businessId,
-    name          : product.name          || "",
-    price         : Number(product.price) || 0,
-    category      : product.category      || "general",
-    colors        : product.colors        || [],
-    sizes         : product.sizes         || [],
-    has_sizes     : (product.sizes || []).length > 0,
-    material      : product.material      || "",
-    description   : product.description   || "",
-    image_url     : product.imageUrl      || "",
-    insta_post_url: product.instaPostUrl  || "",
-    rating        : product.rating        || null,
-    in_stock      : product.inStock       !== false,
-    tags          : product.tags          || [],
+    id             : Date.now().toString(),
+    business_id    : businessId,
+    name           : product.name          || "",
+    price          : Number(product.price) || 0,
+    category       : product.category      || "general",
+    colors         : product.colors        || [],
+    sizes          : product.sizes         || [],
+    has_sizes      : (product.sizes || []).length > 0,
+    material       : product.material      || "",
+    description    : product.description   || "",
+    image_url      : product.imageUrl      || "",
+    insta_post_url : product.instaPostUrl  || "",
+    rating         : product.rating        || null,
+    in_stock       : product.inStock !== false,
+    tags           : product.tags          || [],
   };
 
   try {
-    const { rows } = await db.query(
-      `INSERT INTO catalog
-         (id, business_id, name, price, category, colors, sizes, has_sizes,
-          material, description, image_url, insta_post_url, rating, in_stock, tags)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-       RETURNING *`,
-      [
-        row.id, row.business_id, row.name, row.price, row.category,
-        JSON.stringify(row.colors), JSON.stringify(row.sizes), row.has_sizes,
-        row.material, row.description, row.image_url, row.insta_post_url,
-        row.rating, row.in_stock, JSON.stringify(row.tags),
-      ]
-    );
-    return _toProduct(rows[0]);
+    const { data, error } = await supabaseAdmin
+      .from("catalog")
+      .insert(row)
+      .select()
+      .single();
+    if (error) throw error;
+    return _toProduct(data);
   } catch (e) {
     console.error("[Catalog] addProduct error:", e.message);
     return _toProduct(row);
@@ -47,11 +40,13 @@ async function addProduct(product, businessId = DEFAULT_BID) {
 // ── Get all products ──────────────────────────────────────────────────────────
 async function getAll(businessId = DEFAULT_BID) {
   try {
-    const { rows } = await db.query(
-      `SELECT * FROM catalog WHERE business_id = $1 ORDER BY created_at ASC`,
-      [businessId]
-    );
-    return rows.map(_toProduct);
+    const { data, error } = await supabaseAdmin
+      .from("catalog")
+      .select("*")
+      .eq("business_id", businessId)
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return (data || []).map(_toProduct);
   } catch (e) {
     console.error("[Catalog] getAll error:", e.message);
     return [];
@@ -61,11 +56,14 @@ async function getAll(businessId = DEFAULT_BID) {
 // ── Get single product ────────────────────────────────────────────────────────
 async function get(productId, businessId = DEFAULT_BID) {
   try {
-    const { rows } = await db.query(
-      `SELECT * FROM catalog WHERE id = $1 AND business_id = $2`,
-      [String(productId), businessId]
-    );
-    return rows[0] ? _toProduct(rows[0]) : null;
+    const { data, error } = await supabaseAdmin
+      .from("catalog")
+      .select("*")
+      .eq("id", String(productId))
+      .eq("business_id", businessId)
+      .single();
+    if (error) return null;
+    return _toProduct(data);
   } catch (e) {
     console.error("[Catalog] get error:", e.message);
     return null;
@@ -94,18 +92,10 @@ async function search(intent = {}, businessId = DEFAULT_BID) {
     });
   }
 
-  if (intent.color) {
-    const color = intent.color.toLowerCase();
-    results = results.filter(p => !p.colors?.length || p.colors.some(c => c.toLowerCase().includes(color)));
-  }
-  if (intent.size) {
-    const size = intent.size.toUpperCase();
-    results = results.filter(p => !p.sizes?.length || p.sizes.includes(size));
-  }
-  if (intent.material) {
-    const mat = intent.material.toLowerCase();
-    results = results.filter(p => !p.material || p.material.toLowerCase().includes(mat));
-  }
+  if (intent.color)    { const c = intent.color.toLowerCase();    results = results.filter(p => !p.colors?.length  || p.colors.some(x  => x.toLowerCase().includes(c))); }
+  if (intent.size)     { const s = intent.size.toUpperCase();     results = results.filter(p => !p.sizes?.length   || p.sizes.includes(s)); }
+  if (intent.material) { const m = intent.material.toLowerCase(); results = results.filter(p => !p.material        || p.material.toLowerCase().includes(m)); }
+
   if (intent.maxPrice) {
     const priced = results.filter(p => p.price > 0 && p.price <= intent.maxPrice);
     if (!priced.length) {
@@ -114,12 +104,8 @@ async function search(intent = {}, businessId = DEFAULT_BID) {
     }
     results = priced;
   }
-  if (intent.minPrice) {
-    results = results.filter(p => !p.price || p.price === 0 || p.price >= intent.minPrice);
-  }
-  if (intent.category) {
-    results = results.filter(p => p.category.toLowerCase().includes(intent.category.toLowerCase()));
-  }
+  if (intent.minPrice)  results = results.filter(p => !p.price || p.price === 0 || p.price >= intent.minPrice);
+  if (intent.category)  results = results.filter(p => p.category.toLowerCase().includes(intent.category.toLowerCase()));
 
   results.sort((a, b) => {
     if (!a.price && b.price) return 1;
@@ -133,33 +119,30 @@ async function search(intent = {}, businessId = DEFAULT_BID) {
 
 // ── Update product ────────────────────────────────────────────────────────────
 async function update(productId, changes, businessId = DEFAULT_BID) {
-  const sets = [];
-  const vals = [];
-  let i = 1;
+  const updates = {};
+  if (changes.name        !== undefined) updates.name          = changes.name;
+  if (changes.price       !== undefined) updates.price         = changes.price;
+  if (changes.category    !== undefined) updates.category      = changes.category;
+  if (changes.colors      !== undefined) updates.colors        = changes.colors;
+  if (changes.sizes       !== undefined) { updates.sizes = changes.sizes; updates.has_sizes = changes.sizes.length > 0; }
+  if (changes.material    !== undefined) updates.material      = changes.material;
+  if (changes.description !== undefined) updates.description   = changes.description;
+  if (changes.imageUrl    !== undefined) updates.image_url     = changes.imageUrl;
+  if (changes.inStock     !== undefined) updates.in_stock      = changes.inStock;
+  if (changes.tags        !== undefined) updates.tags          = changes.tags;
 
-  if (changes.name        !== undefined) { sets.push(`name=$${i++}`);        vals.push(changes.name); }
-  if (changes.price       !== undefined) { sets.push(`price=$${i++}`);       vals.push(changes.price); }
-  if (changes.category    !== undefined) { sets.push(`category=$${i++}`);    vals.push(changes.category); }
-  if (changes.colors      !== undefined) { sets.push(`colors=$${i++}`);      vals.push(JSON.stringify(changes.colors)); }
-  if (changes.sizes       !== undefined) {
-    sets.push(`sizes=$${i++}`);    vals.push(JSON.stringify(changes.sizes));
-    sets.push(`has_sizes=$${i++}`); vals.push(changes.sizes.length > 0);
-  }
-  if (changes.material    !== undefined) { sets.push(`material=$${i++}`);    vals.push(changes.material); }
-  if (changes.description !== undefined) { sets.push(`description=$${i++}`); vals.push(changes.description); }
-  if (changes.imageUrl    !== undefined) { sets.push(`image_url=$${i++}`);   vals.push(changes.imageUrl); }
-  if (changes.inStock     !== undefined) { sets.push(`in_stock=$${i++}`);    vals.push(changes.inStock); }
-  if (changes.tags        !== undefined) { sets.push(`tags=$${i++}`);        vals.push(JSON.stringify(changes.tags)); }
+  if (!Object.keys(updates).length) return get(productId, businessId);
 
-  if (!sets.length) return get(productId, businessId);
-
-  vals.push(String(productId), businessId);
   try {
-    const { rows } = await db.query(
-      `UPDATE catalog SET ${sets.join(", ")} WHERE id=$${i} AND business_id=$${i + 1} RETURNING *`,
-      vals
-    );
-    return rows[0] ? _toProduct(rows[0]) : null;
+    const { data, error } = await supabaseAdmin
+      .from("catalog")
+      .update(updates)
+      .eq("id", String(productId))
+      .eq("business_id", businessId)
+      .select()
+      .single();
+    if (error) throw error;
+    return _toProduct(data);
   } catch (e) {
     console.error("[Catalog] update error:", e.message);
     return null;
@@ -169,11 +152,15 @@ async function update(productId, changes, businessId = DEFAULT_BID) {
 // ── Toggle stock ──────────────────────────────────────────────────────────────
 async function toggleStock(productId, inStock, businessId = DEFAULT_BID) {
   try {
-    const { rows } = await db.query(
-      `UPDATE catalog SET in_stock=$1 WHERE id=$2 AND business_id=$3 RETURNING *`,
-      [inStock, String(productId), businessId]
-    );
-    return rows[0] ? _toProduct(rows[0]) : null;
+    const { data, error } = await supabaseAdmin
+      .from("catalog")
+      .update({ in_stock: inStock })
+      .eq("id", String(productId))
+      .eq("business_id", businessId)
+      .select()
+      .single();
+    if (error) throw error;
+    return _toProduct(data);
   } catch (e) {
     console.error("[Catalog] toggleStock error:", e.message);
     return null;
@@ -183,10 +170,12 @@ async function toggleStock(productId, inStock, businessId = DEFAULT_BID) {
 // ── Delete product ────────────────────────────────────────────────────────────
 async function deleteProduct(productId, businessId = DEFAULT_BID) {
   try {
-    await db.query(
-      `DELETE FROM catalog WHERE id=$1 AND business_id=$2`,
-      [String(productId), businessId]
-    );
+    const { error } = await supabaseAdmin
+      .from("catalog")
+      .delete()
+      .eq("id", String(productId))
+      .eq("business_id", businessId);
+    if (error) throw error;
     return true;
   } catch (e) {
     console.error("[Catalog] deleteProduct error:", e.message);
@@ -208,7 +197,7 @@ function _toProduct(row) {
     description  : row.description  || "",
     imageUrl     : row.image_url    || "",
     instaPostUrl : row.insta_post_url || "",
-    rating       : row.rating       != null ? Number(row.rating) : null,
+    rating       : row.rating != null ? Number(row.rating) : null,
     inStock      : row.in_stock,
     tags         : row.tags         || [],
     createdAt    : row.created_at ? new Date(row.created_at).getTime() : Date.now(),
