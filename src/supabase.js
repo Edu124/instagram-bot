@@ -6,7 +6,7 @@
 const { createClient } = require("@supabase/supabase-js");
 
 const SUPABASE_URL         = "https://ekughxkikjzkimadyyuk.supabase.co";
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
+const SUPABASE_SERVICE_KEY = process.env.SERVICE_ROLE || "";
 
 // Only initialise if key is present — prevents crash on missing env var
 let supabaseAdmin = null;
@@ -16,7 +16,7 @@ if (SUPABASE_SERVICE_KEY) {
   });
   console.log("[Supabase] Admin client ready ✓");
 } else {
-  console.warn("[Supabase] SUPABASE_SERVICE_KEY not set — add it in Railway variables");
+  console.warn("[Supabase] SERVICE_ROLE not set — add it in Railway variables");
 }
 
 module.exports = { supabaseAdmin };
