@@ -8,12 +8,15 @@ const { createClient } = require("@supabase/supabase-js");
 const SUPABASE_URL         = "https://ekughxkikjzkimadyyuk.supabase.co";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 
-if (!SUPABASE_SERVICE_KEY) {
-  console.warn("[Supabase] WARNING: SUPABASE_SERVICE_KEY not set — bot DB writes will fail");
+// Only initialise if key is present — prevents crash on missing env var
+let supabaseAdmin = null;
+if (SUPABASE_SERVICE_KEY) {
+  supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  console.log("[Supabase] Admin client ready ✓");
+} else {
+  console.warn("[Supabase] SUPABASE_SERVICE_KEY not set — add it in Railway variables");
 }
-
-const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  auth: { autoRefreshToken: false, persistSession: false },
-});
 
 module.exports = { supabaseAdmin };
