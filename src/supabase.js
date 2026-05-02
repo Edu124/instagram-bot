@@ -5,7 +5,7 @@
 
 const { createClient } = require("@supabase/supabase-js");
 
-const SUPABASE_URL         = "https://chwwlgcipsqogjvupqwd.supabase.co";
+const SUPABASE_URL         = "https://ekughxkikjzkimadyyuk.supabase.co";
 const SUPABASE_SERVICE_KEY = process.env.SERVICE_ROLE || "";
 
 // Only initialise if key is present — prevents crash on missing env var
