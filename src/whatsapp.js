@@ -114,6 +114,21 @@ function apiPost(path, bodyStr, token = WA_TOKEN) {
   });
 }
 
+// ── Send a video message ──────────────────────────────────────────────────────
+async function sendVideo(to, videoUrl, caption = "", phoneId = PHONE_ID, token = WA_TOKEN) {
+  if (!token || !phoneId) {
+    console.log(`[WhatsApp MOCK] → ${to}: [VIDEO] ${videoUrl} — "${caption.slice(0, 60)}"`);
+    return;
+  }
+  const body = JSON.stringify({
+    messaging_product: "whatsapp",
+    to,
+    type: "video",
+    video: { link: videoUrl, caption: sanitize(caption) },
+  });
+  return apiPost(`/${phoneId}/messages`, body, token);
+}
+
 function sanitize(text) { return text.slice(0, 4096); }
 
-module.exports = { send, sendProductCards, sendQuickReplies, sendInvoice, markReadAndType };
+module.exports = { send, sendProductCards, sendQuickReplies, sendInvoice, markReadAndType, sendVideo };

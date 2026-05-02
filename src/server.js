@@ -1493,6 +1493,37 @@ app.post("/api/promote/abandoned", async (req, res) => {
   res.json({ ok: true, sent: recovered });
 });
 
+// POST /api/promote/video — blast a video + caption to all/segment customers
+app.post("/api/promote/video", async (req, res) => {
+  const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
+  const { videoUrl, caption = "", segment = "all" } = req.body;
+  if (!videoUrl) return res.status(400).json({ error: "videoUrl required" });
+
+  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
+
+  // Filter by segment
+  const targets = allCustomers.filter(c => {
+    if (segment === "all")      return true;
+    if (segment === "vip")      return (c.tags || []).includes("vip");
+    if (segment === "repeat")   return (c.totalOrders || 0) >= 2;
+    if (segment === "new")      return c.firstSeenAt && (Date.now() - new Date(c.firstSeenAt).getTime()) < 30 * 86400000;
+    if (segment === "inactive") return c.lastActiveAt && (Date.now() - new Date(c.lastActiveAt).getTime()) > 60 * 86400000;
+    return true;
+  });
+
+  let sent = 0;
+  for (const c of targets) {
+    try {
+      const ctx = _waCtx(c.id);
+      await wa.sendVideo(c.id, videoUrl, caption, ctx.phoneId, ctx.token);
+      sent++;
+    } catch (e) {
+      console.warn(`[VideoBlast] Failed to send to ${c.id}:`, e.message);
+    }
+  }
+  res.json({ ok: true, sent, total: targets.length });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WISHLIST APIs
 // ─────────────────────────────────────────────────────────────────────────────
