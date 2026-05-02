@@ -386,10 +386,12 @@ async function handleSearch(customerId, sess, message, name) {
 
   // Greeting → always show welcome, skip AI search
   if (GREETINGS.test(message.trim())) {
+    const bizSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+    const bizName = bizSettings.business_name || "our store";
     const greets = {
-      hindi   : `नमस्ते ${name}! 👋\n\nमैं Selly हूं — आपका WhatsApp shopping assistant! 🛍️\n\nआप क्या ढूंढ रहे हैं? बताइए!\nउदाहरण: "नीली जींस ₹800 में" या "कुर्ती size M"`,
-      hinglish: `Hey ${name}! 👋 Main Selly hoon — aapka WhatsApp shopping assistant! 🛍️\n\nKya dhundh rahe ho? Bolo!\nExample: "blue jeans under 800" ya "kurti size M"`,
-      english : `Hi ${name}! 👋 I'm Selly — your WhatsApp shopping assistant! 🛍️\n\nWhat are you looking for?\nExample: "silk saree" or "floral saree size M"`,
+      hindi   : `नमस्ते ${name}! 👋\n\n*${bizName}* में आपका स्वागत है! 🛍️\n\nआप क्या ढूंढ रहे हैं? बताइए!\nउदाहरण: "नीली जींस ₹800 में" या "कुर्ती size M"`,
+      hinglish: `Hey ${name}! 👋 Welcome to *${bizName}*! 🛍️\n\nKya dhundh rahe ho? Bolo!\nExample: "blue jeans under 800" ya "kurti size M"`,
+      english : `Hi ${name}! 👋 Welcome to *${bizName}*! 🛍️\n\nWhat are you looking for today?\nExample: "silk saree" or "floral kurti size M"`,
     };
     return send(customerId, greets[lang] || greets.english);
   }
@@ -397,10 +399,12 @@ async function handleSearch(customerId, sess, message, name) {
   const intent = await ai.extractSearchIntent(message);
 
   if (!intent.product) {
+    const bizSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+    const bizName = bizSettings.business_name || "our store";
     const greets = {
-      hindi   : `नमस्ते ${name}! 👋\n\nमैं Selly हूं — आपका WhatsApp shopping assistant! 🛍️\n\nआप क्या ढूंढ रहे हैं? बताइए!\nउदाहरण: "नीली जींस ₹800 में" या "कुर्ती size M"`,
-      hinglish: `Hey ${name}! 👋 Main Selly hoon — aapka WhatsApp shopping assistant! 🛍️\n\nKya dhundh rahe ho? Bolo!\nExample: "blue jeans under 800" ya "kurti size M"`,
-      english : `Hi ${name}! 👋 I'm Selly — your WhatsApp shopping assistant! 🛍️\n\nWhat are you looking for?\nExample: "blue jeans under ₹800" or "cotton kurti size M"`,
+      hindi   : `नमस्ते ${name}! 👋\n\n*${bizName}* में आपका स्वागत है! 🛍️\n\nआप क्या ढूंढ रहे हैं? बताइए!\nउदाहरण: "नीली जींस ₹800 में" या "कुर्ती size M"`,
+      hinglish: `Hey ${name}! 👋 Welcome to *${bizName}*! 🛍️\n\nKya dhundh rahe ho? Bolo!\nExample: "blue jeans under 800" ya "kurti size M"`,
+      english : `Hi ${name}! 👋 Welcome to *${bizName}*! 🛍️\n\nWhat are you looking for?\nExample: "blue jeans under ₹800" or "cotton kurti size M"`,
     };
     return send(customerId, greets[lang] || greets.english);
   }
@@ -736,9 +740,10 @@ async function handlePaymentChoice(customerId, sess, message) {
 // Order Creation + Billing
 // ─────────────────────────────────────────────────────────────────────────────
 async function placeOrder(customerId, sess, paymentMode) {
-  const lang = sess.lang || "english";
+  const lang  = sess.lang || "english";
+  const bizId = sess.businessId || DEFAULT_BUSINESS_ID;
 
-  const bizSettings = await getSettings(DEFAULT_BUSINESS_ID);
+  const bizSettings = await getSettings(bizId);
   const bill = billing.generate({
     cart            : sess.cart,
     address         : sess.address,
@@ -764,8 +769,6 @@ async function placeOrder(customerId, sess, paymentMode) {
   })();
 
   const commResult  = commissionEngine.calculate(sess.cart, promoSource);
-
-  const bizId = sess.businessId || DEFAULT_BUSINESS_ID;
 
   const order = await orders.create({
     customerId,
@@ -880,7 +883,7 @@ async function confirmOrder(customerId, order, isOnline = true) {
   const referralCode  = customer?.referralCode || "";
 
   // WhatsApp handoff line
-  const bizSettings_  = await getSettings(DEFAULT_BUSINESS_ID);
+  const bizSettings_  = await getSettings(bizId);
   const waNum         = (bizSettings_.whatsapp_number || "").replace(/[^0-9]/g, "");
   const waLine = waNum ? {
     hindi   : `\n💬 Koi sawaal? Direct chat: wa.me/${waNum}`,
@@ -1555,7 +1558,8 @@ app.get("/api/tracking/:awb", async (req, res) => {
   const { awb } = req.params;
   const carrier = req.query.carrier || "shiprocket";
   try {
-    const settings = await getSettings(DEFAULT_BUSINESS_ID);
+    const bid      = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
+    const settings = await getSettings(bid);
     const result   = await trackingMod.track(awb, carrier, {
       shiprocketEmail   : settings.shiprocket_email,
       shiprocketPassword: settings.shiprocket_password,
@@ -1633,16 +1637,20 @@ app.post("/api/promote/segment", async (req, res) => {
 // ── Business Settings ─────────────────────────────────────────────────────────
 // In-memory cache so every order doesn't hit the DB
 const db = require("./db");
+const { supabaseAdmin } = require("./supabase");
 const _settingsCache = {};
 
+// Reads business settings from Supabase (migrated from Railway PostgreSQL)
 async function getSettings(businessId = DEFAULT_BUSINESS_ID) {
   if (_settingsCache[businessId]) return _settingsCache[businessId];
   try {
-    const { rows } = await db.query(
-      `SELECT * FROM business_settings WHERE business_id = $1`,
-      [businessId]
-    );
-    if (rows[0]) { _settingsCache[businessId] = rows[0]; return rows[0]; }
+    if (!supabaseAdmin) return {};
+    const { data, error } = await supabaseAdmin
+      .from("business_settings")
+      .select("*")
+      .eq("business_id", businessId)
+      .maybeSingle();
+    if (data) { _settingsCache[businessId] = data; return data; }
   } catch {}
   return {}; // fallback to billing.js defaults
 }
@@ -1655,38 +1663,23 @@ app.get("/api/settings", async (req, res) => {
 
 app.post("/api/settings", async (req, res) => {
   const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
-  const {
-    business_name, business_gst_no, business_address,
-    gst_enabled, gst_rate, delivery_charge, free_above, cod_fee,
-    whatsapp_number, shiprocket_email, shiprocket_password, delhivery_api_key,
-  } = req.body;
-
-  const fields = [];
-  const vals   = [];
-  let i = 1;
-  if (business_name       !== undefined) { fields.push(`business_name=$${i++}`);       vals.push(business_name); }
-  if (business_gst_no     !== undefined) { fields.push(`business_gst_no=$${i++}`);     vals.push(business_gst_no); }
-  if (business_address    !== undefined) { fields.push(`business_address=$${i++}`);    vals.push(business_address); }
-  if (gst_enabled         !== undefined) { fields.push(`gst_enabled=$${i++}`);         vals.push(gst_enabled); }
-  if (gst_rate            !== undefined) { fields.push(`gst_rate=$${i++}`);            vals.push(Number(gst_rate)); }
-  if (delivery_charge     !== undefined) { fields.push(`delivery_charge=$${i++}`);     vals.push(Number(delivery_charge)); }
-  if (free_above          !== undefined) { fields.push(`free_above=$${i++}`);          vals.push(Number(free_above)); }
-  if (cod_fee             !== undefined) { fields.push(`cod_fee=$${i++}`);             vals.push(Number(cod_fee)); }
-  if (whatsapp_number     !== undefined) { fields.push(`whatsapp_number=$${i++}`);     vals.push(whatsapp_number); }
-  if (shiprocket_email    !== undefined) { fields.push(`shiprocket_email=$${i++}`);    vals.push(shiprocket_email); }
-  if (shiprocket_password !== undefined) { fields.push(`shiprocket_password=$${i++}`); vals.push(shiprocket_password); }
-  if (delhivery_api_key   !== undefined) { fields.push(`delhivery_api_key=$${i++}`);   vals.push(delhivery_api_key); }
-
-  if (!fields.length) return res.status(400).json({ error: "No fields to update" });
-  fields.push(`updated_at=NOW()`);
-  vals.push(bid);
+  const allowed = [
+    "business_name","business_gst_no","business_address",
+    "gst_enabled","gst_rate","delivery_charge","free_above","cod_fee",
+    "whatsapp_number","shiprocket_email","shiprocket_password","delhivery_api_key",
+  ];
+  const updates = { business_id: bid, updated_at: new Date().toISOString() };
+  for (const key of allowed) {
+    if (req.body[key] !== undefined) updates[key] = req.body[key];
+  }
+  if (Object.keys(updates).length <= 2) return res.status(400).json({ error: "No fields to update" });
 
   try {
-    await db.query(
-      `INSERT INTO business_settings (business_id) VALUES ($${i})
-       ON CONFLICT (business_id) DO UPDATE SET ${fields.join(", ")}`,
-      vals
-    );
+    if (!supabaseAdmin) return res.status(503).json({ error: "Supabase not configured" });
+    const { error } = await supabaseAdmin
+      .from("business_settings")
+      .upsert(updates, { onConflict: "business_id" });
+    if (error) throw new Error(error.message);
     delete _settingsCache[bid]; // invalidate cache
     const s = await getSettings(bid);
     res.json({ ok: true, settings: s });
