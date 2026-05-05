@@ -7,6 +7,7 @@ require("dotenv").config();
 const express    = require("express");
 const bodyParser = require("body-parser");
 const path       = require("path");
+const fs         = require("fs");
 
 // ── DB setup ──────────────────────────────────────────────────────────────────
 const { setup } = require("./setup");
@@ -15,6 +16,7 @@ const { setup } = require("./setup");
 const session    = require("./session");
 const wa         = require("./whatsapp");   // Primary sender — WhatsApp only
 const catalog    = require("./catalog");
+const shop       = require("./shop");       // Customer-facing catalog web page
 const orders     = require("./orders");
 const customers  = require("./customers");
 const ai         = require("./ai");
@@ -70,8 +72,8 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(bodyParser.json());
-app.use(bodyParser.text({ type: "text/plain", limit: "10mb" }));
+app.use(bodyParser.json({ limit: "20mb" }));     // increased for base64 media uploads
+app.use(bodyParser.text({ type: "text/plain", limit: "20mb" }));
 
 // ── Request logger — logs every incoming API call ─────────────────────────────
 app.use((req, res, next) => {
@@ -82,6 +84,10 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.static(path.join(__dirname, "../public")));
+
+// ── Customer-facing shop page ─────────────────────────────────────────────────
+// /shop/:businessId?q=jeans&max=800&min=200&color=blue
+shop.register(app, catalog);
 
 // ── Health check ───────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.json({
@@ -262,6 +268,9 @@ async function routeMessage(customerId, sess, message, name) {
   const state = sess.state;
   const lang  = sess.lang || "english";
 
+  // ── Shop page cart: customer sent SELLY_CART: from the shop link ──────────
+  if (message.includes("SELLY_CART:")) return handleSellyCart(customerId, sess, message, name);
+
   // ── Global commands (any state) ───────────────────────────────────────────
   if (isLoyaltyRequest(message))    return handleLoyaltyCheck(customerId, sess);
   if (isTrackingRequest(message))   return handleTracking(customerId, sess, message);
@@ -371,6 +380,40 @@ async function handleStatusProductResponse(customerId, sess, message) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// HELPER: Notify business owner when customer sends an unknown request
+// type: "query" (general question) | "product_request" (not found in catalog)
+// ─────────────────────────────────────────────────────────────────────────────
+async function notifyOwner(bizId, customerId, customerName, message, type = "query") {
+  try {
+    const bizSettings = await getSettings(bizId);
+    const rawNum      = (bizSettings.whatsapp_number || "").replace(/[^0-9]/g, "");
+    if (!rawNum) return; // owner hasn't set their number — skip silently
+
+    const custNum  = customerId.replace(/[^0-9]/g, "");
+    const replyUrl = `https://wa.me/${custNum}`;
+
+    const emoji = type === "product_request" ? "📦" : "💬";
+    const label = type === "product_request" ? "Product Request (not in catalog)" : "Customer Query";
+
+    const text =
+      `🔔 *New ${label}*\n\n` +
+      `👤 *Customer:* ${customerName}\n` +
+      `${emoji} *Message:* ${message}\n\n` +
+      `📱 Reply directly:\n${replyUrl}`;
+
+    // Use the business's own WhatsApp credentials to send the notification
+    const s       = session.get(customerId);
+    const phoneId = s?.phoneId || DEFAULT_PHONE_ID;
+    const token   = s?.waToken || DEFAULT_WA_TOKEN;
+
+    await wa.send(rawNum, text, phoneId, token);
+    console.log(`[OwnerNotify] Sent ${type} alert to ${rawNum} for biz=${bizId}`);
+  } catch (e) {
+    console.error("[OwnerNotify] Error:", e.message); // non-fatal
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // FEATURE: Product Search (with Bargaining hook)
 // ─────────────────────────────────────────────────────────────────────────────
 const GREETINGS = /^(hi+|hello+|hey+|helo|namaste|namaskar|hii+|sup|yo|ola|hola|good\s*(morning|afternoon|evening|night)|start|menu|shop|catalog)$/i;
@@ -387,38 +430,82 @@ async function handleSearch(customerId, sess, message, name) {
   // Greeting → always show welcome, skip AI search
   if (GREETINGS.test(message.trim())) {
     const bizSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
-    const bizName = bizSettings.business_name || "our store";
+    const bizName     = bizSettings.business_name || "our store";
+    const industry    = (bizSettings.industry || "").toLowerCase();
+
+    // Industry-aware greeting examples
+    let exampleHindi    = `"नीली जींस ₹800 में" या "कुर्ती size M"`;
+    let exampleHinglish = `"blue jeans under 800" ya "kurti size M"`;
+    let exampleEnglish  = `"silk saree" or "floral kurti size M"`;
+
+    if (industry.includes("education")) {
+      exampleHindi    = `"Mathematics course" या "Standard 9th batch"`;
+      exampleHinglish = `"science class" ya "10th standard batch"`;
+      exampleEnglish  = `"Mathematics course" or "Standard 9th batch"`;
+    } else if (industry.includes("tourism") || industry.includes("travel")) {
+      exampleHindi    = `"Goa tour" या "Manali 3 nights package"`;
+      exampleHinglish = `"Goa tour package" ya "Manali trip 3 nights"`;
+      exampleEnglish  = `"Goa tour" or "Manali 3 nights package"`;
+    } else if (industry.includes("food") || industry.includes("restaurant")) {
+      exampleHindi    = `"paneer pizza" या "veg thali"`;
+      exampleHinglish = `"paneer pizza" ya "veg thali"`;
+      exampleEnglish  = `"paneer pizza" or "veg thali"`;
+    }
+
     const greets = {
-      hindi   : `नमस्ते ${name}! 👋\n\n*${bizName}* में आपका स्वागत है! 🛍️\n\nआप क्या ढूंढ रहे हैं? बताइए!\nउदाहरण: "नीली जींस ₹800 में" या "कुर्ती size M"`,
-      hinglish: `Hey ${name}! 👋 Welcome to *${bizName}*! 🛍️\n\nKya dhundh rahe ho? Bolo!\nExample: "blue jeans under 800" ya "kurti size M"`,
-      english : `Hi ${name}! 👋 Welcome to *${bizName}*! 🛍️\n\nWhat are you looking for today?\nExample: "silk saree" or "floral kurti size M"`,
+      hindi   : `नमस्ते ${name}! 👋\n\n*${bizName}* में आपका स्वागत है!\n\nआप क्या ढूंढ रहे हैं? बताइए!\nउदाहरण: ${exampleHindi}`,
+      hinglish: `Hey ${name}! 👋 Welcome to *${bizName}*!\n\nKya dhundh rahe ho? Bolo!\nExample: ${exampleHinglish}`,
+      english : `Hi ${name}! 👋 Welcome to *${bizName}*!\n\nWhat are you looking for today?\nExample: ${exampleEnglish}`,
     };
     return send(customerId, greets[lang] || greets.english);
   }
 
   const intent = await ai.extractSearchIntent(message);
+  const bizId  = sess.businessId || DEFAULT_BUSINESS_ID;
 
   if (!intent.product) {
-    const bizSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
-    const bizName = bizSettings.business_name || "our store";
-    const greets = {
-      hindi   : `नमस्ते ${name}! 👋\n\n*${bizName}* में आपका स्वागत है! 🛍️\n\nआप क्या ढूंढ रहे हैं? बताइए!\nउदाहरण: "नीली जींस ₹800 में" या "कुर्ती size M"`,
-      hinglish: `Hey ${name}! 👋 Welcome to *${bizName}*! 🛍️\n\nKya dhundh rahe ho? Bolo!\nExample: "blue jeans under 800" ya "kurti size M"`,
-      english : `Hi ${name}! 👋 Welcome to *${bizName}*! 🛍️\n\nWhat are you looking for?\nExample: "blue jeans under ₹800" or "cotton kurti size M"`,
+    // Not a product search — customer asked something else (delivery, timings, etc.)
+    // Tell customer their query is forwarded, then notify the owner.
+    const forwardMsg = {
+      hindi   : `📝 आपका सवाल हमारी team को भेज दिया गया है!\n\n*"${message}"*\n\nवो जल्द ही आपसे contact करेंगे। 😊`,
+      hinglish: `📝 Aapka query team ko forward ho gaya hai!\n\n*"${message}"*\n\nHum jald reply karenge. 😊`,
+      english : `📝 Your query has been forwarded to our team!\n\n*"${message}"*\n\nWe'll get back to you shortly. 😊`,
     };
-    return send(customerId, greets[lang] || greets.english);
+    await send(customerId, forwardMsg[lang] || forwardMsg.english);
+    await notifyOwner(bizId, customerId, name, message, "query");
+    return;
   }
 
-  const searchResult = await catalog.search(intent);
-  const results      = searchResult.results || searchResult;
+  let searchResult = await catalog.search(intent, bizId);   // ← pass businessId
+  let results      = searchResult.results || searchResult;
 
+  // If no exact match — try showing all products for this business
   if (!results.length) {
-    const noResult = {
-      hindi   : `😕 "${intent.rawQuery}" के लिए कोई प्रोडक्ट नहीं मिला।\nकुछ अलग try करें!`,
-      hinglish: `😕 "${intent.rawQuery}" ke liye kuch nahi mila.\nKuch aur try karo!`,
-      english : `😕 No products found for "${intent.rawQuery}".\nTry different keywords!`,
-    };
-    return send(customerId, noResult[lang] || noResult.english);
+    const all = await catalog.getAll(bizId);
+    const allInStock = all.filter(p => p.inStock !== false);
+    if (allInStock.length) {
+      // Show all available products with a helpful message
+      const bizSettings2  = await getSettings(bizId);
+      const industry2     = (bizSettings2.industry || "").toLowerCase();
+      const itemLabel     = industry2.includes("education") ? "courses" :
+                            industry2.includes("tourism")   ? "packages" : "products";
+      const browseMsg = {
+        hindi   : `😕 *"${intent.rawQuery}"* नहीं मिला।\n\nयहाँ हमारे सभी available ${itemLabel} हैं:`,
+        hinglish: `😕 *"${intent.rawQuery}"* nahi mila.\n\nYe hain hamare saare available ${itemLabel}:`,
+        english : `😕 Couldn't find *"${intent.rawQuery}"* exactly.\n\nHere are all our available ${itemLabel}:`,
+      };
+      await send(customerId, browseMsg[lang] || browseMsg.english);
+      results = allInStock;
+    } else {
+      const noResult = {
+        hindi   : `😕 *"${intent.rawQuery}"* अभी available नहीं है।\n\nआपका request हमारी team को भेज दिया गया है — जल्द ही update मिलेगी! 🔔`,
+        hinglish: `😕 *"${intent.rawQuery}"* abhi available nahi hai.\n\nRequest team ko forward ho gayi — jaldi update milega! 🔔`,
+        english : `😕 *"${intent.rawQuery}"* isn't available right now.\n\nYour request has been forwarded to our team — we'll update you soon! 🔔`,
+      };
+      await send(customerId, noResult[lang] || noResult.english);
+      await notifyOwner(bizId, customerId, name, intent.rawQuery || message, "product_request");
+      return;
+    }
   }
 
   session.update(customerId, { state: "selecting", lastSearch: intent, searchResults: results });
@@ -445,6 +532,26 @@ async function handleSearch(customerId, sess, message, name) {
 
   await send(customerId, (header[lang] || header.english) + productList + (footer[lang] || footer.english));
 
+  // ── Shop link — send for all industries except Kirana ─────────────────────
+  try {
+    const bizSettings = await getSettings(bizId);
+    const industry    = bizSettings.industry || "product";
+
+    if (industry !== "kirana") {
+      const BASE_URL = (process.env.BASE_URL || "https://instagram-bot-production-ef01.up.railway.app").replace(/\/$/, "");
+      const shopUrl  = shop.buildShopUrl(BASE_URL, bizId, intent);
+
+      const linkMsg = {
+        hindi   : `🖼️ *Photos के साथ देखें:*\n${shopUrl}`,
+        hinglish: `🖼️ *Photos ke saath dekho:*\n${shopUrl}`,
+        english : `🖼️ *View with photos:*\n${shopUrl}`,
+      };
+      await send(customerId, linkMsg[lang] || linkMsg.english);
+    }
+  } catch (e) {
+    console.error("[Shop link] Error:", e.message); // non-fatal
+  }
+
   if (sess.cart?.length) {
     const cartMsg = {
       hindi   : `🛒 *Cart (${sess.cart.length} item):* ${sess.cart.map(i => i.name).join(", ")}`,
@@ -453,6 +560,85 @@ async function handleSearch(customerId, sess, message, name) {
     };
     await send(customerId, cartMsg[lang] || cartMsg.english);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FEATURE: Shop-Page Cart (SELLY_CART: protocol)
+// Customer tapped "Order X items" on the shop page → WhatsApp carries
+// "Hi! I want:\n1. Blue Jeans (₹699)\n\nSELLY_CART:Blue Jeans|White Tee"
+// ─────────────────────────────────────────────────────────────────────────────
+async function handleSellyCart(customerId, sess, message, name) {
+  const lang  = sess.lang || "english";
+  const bizId = sess.businessId || DEFAULT_BUSINESS_ID;
+
+  // Extract the pipe-separated item names after SELLY_CART:
+  const cartMatch = message.match(/SELLY_CART:(.+)/);
+  if (!cartMatch) return handleSearch(customerId, sess, message, name);
+
+  const rawNames = cartMatch[1].split("|").map(n => n.trim()).filter(Boolean);
+  if (!rawNames.length) return handleSearch(customerId, sess, message, name);
+
+  const found    = [];
+  const notFound = [];
+
+  for (const itemName of rawNames) {
+    try {
+      const result = await catalog.search({ product: itemName, rawQuery: itemName }, bizId);
+      const items  = result.results || result;
+      if (items.length) {
+        const best = items[0];
+        if (!found.find(f => f.id === best.id)) {
+          found.push({ ...best, selectedSize: null });
+        }
+      } else {
+        notFound.push(itemName);
+      }
+    } catch (e) {
+      console.error(`[SellyCart] Lookup error for "${itemName}":`, e.message);
+      notFound.push(itemName);
+    }
+  }
+
+  if (!found.length) {
+    const nf = {
+      hindi   : `😕 Select किए हुए items नहीं मिले। कृपया दोबारा search करें।`,
+      hinglish: `😕 Selected items nahi mile. Dobara search karo.`,
+      english : `😕 Couldn't find the items you selected. Please try searching again.`,
+    };
+    return send(customerId, nf[lang] || nf.english);
+  }
+
+  // Merge with existing cart (avoid duplicates)
+  const existing = sess.cart || [];
+  const merged   = [...existing];
+  for (const p of found) {
+    if (!merged.find(i => i.id === p.id)) merged.push(p);
+  }
+
+  session.update(customerId, { cart: merged, state: "selecting" });
+
+  const itemList = found.map((p, i) => {
+    const priceStr = p.price > 0 ? `₹${p.price}` : "📩 Contact";
+    return `${i + 1}. *${p.name}* — ${priceStr}`;
+  }).join("\n");
+
+  const total    = merged.reduce((s, p) => s + (p.price || 0), 0);
+  const totalStr = total > 0 ? `\n\n💰 *Cart total: ₹${total.toLocaleString("en-IN")}*` : "";
+
+  const notFoundStr = notFound.length
+    ? `\n⚠️ Not found: ${notFound.map(n => `_${n}_`).join(", ")}`
+    : "";
+
+  const cartCountStr = merged.length > found.length
+    ? ` (${merged.length} total in cart)`
+    : "";
+
+  const confirmMsg = {
+    hindi   : `🛒 *${found.length} item cart में add हुए!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\n"done" reply करें checkout के लिए ✅\nया और items search करें 🔍`,
+    hinglish: `🛒 *${found.length} item cart mein add ho gaye!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\n"done" reply karo checkout ke liye ✅\nYa aur items search karo 🔍`,
+    english : `🛒 *${found.length} item${found.length > 1 ? "s" : ""} added to cart!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\nReply *"done"* to checkout ✅\nOr search for more items 🔍`,
+  };
+  return send(customerId, confirmMsg[lang] || confirmMsg.english);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1522,6 +1708,110 @@ app.post("/api/promote/video", async (req, res) => {
     }
   }
   res.json({ ok: true, sent, total: targets.length });
+});
+
+// POST /api/promote/upload — save a base64 file to public/media/, return URL
+// Used by Image Blast and PDF Blast so teachers can pick from device
+app.post("/api/promote/upload", async (req, res) => {
+  try {
+    const { base64, mimeType = "application/octet-stream", filename = "file" } = req.body;
+    if (!base64) return res.status(400).json({ error: "base64 required" });
+
+    const buf  = Buffer.from(base64, "base64");
+    const ext  = path.extname(filename) || (mimeType.includes("pdf") ? ".pdf" : ".jpg");
+    const name = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+    const dir  = path.join(__dirname, "../public/media");
+
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(path.join(dir, name), buf);
+
+    const BASE_URL = (process.env.BASE_URL || "https://instagram-bot-production-ef01.up.railway.app").replace(/\/$/, "");
+    res.json({ ok: true, url: `${BASE_URL}/media/${name}`, filename: name });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/promote/image — blast an image to all/segment customers (or students)
+app.post("/api/promote/image", async (req, res) => {
+  const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
+  const { imageUrl, caption = "", segment = "all" } = req.body;
+  if (!imageUrl) return res.status(400).json({ error: "imageUrl required" });
+
+  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
+  const targets = allCustomers.filter(c => {
+    if (segment === "all")      return true;
+    if (segment === "vip")      return (c.tags || []).includes("vip");
+    if (segment === "repeat")   return (c.totalOrders || 0) >= 2;
+    if (segment === "new")      return c.firstSeenAt && (Date.now() - new Date(c.firstSeenAt).getTime()) < 30 * 86400000;
+    if (segment === "inactive") return c.lastActiveAt && (Date.now() - new Date(c.lastActiveAt).getTime()) > 60 * 86400000;
+    return true;
+  });
+
+  let sent = 0;
+  for (const c of targets) {
+    try {
+      const ctx = _waCtx(c.id);
+      await wa.sendImage(c.id, imageUrl, caption, ctx.phoneId, ctx.token);
+      sent++;
+    } catch (e) {
+      console.warn(`[ImageBlast] Failed ${c.id}:`, e.message);
+    }
+  }
+  res.json({ ok: true, sent, total: targets.length });
+});
+
+// POST /api/promote/pdf — blast a PDF/document to all/segment customers (or students)
+app.post("/api/promote/pdf", async (req, res) => {
+  const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
+  const { pdfUrl, caption = "", filename = "Document.pdf", segment = "all" } = req.body;
+  if (!pdfUrl) return res.status(400).json({ error: "pdfUrl required" });
+
+  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
+  const targets = allCustomers.filter(c => {
+    if (segment === "all")      return true;
+    if (segment === "vip")      return (c.tags || []).includes("vip");
+    if (segment === "repeat")   return (c.totalOrders || 0) >= 2;
+    if (segment === "new")      return c.firstSeenAt && (Date.now() - new Date(c.firstSeenAt).getTime()) < 30 * 86400000;
+    if (segment === "inactive") return c.lastActiveAt && (Date.now() - new Date(c.lastActiveAt).getTime()) > 60 * 86400000;
+    return true;
+  });
+
+  let sent = 0;
+  for (const c of targets) {
+    try {
+      const ctx = _waCtx(c.id);
+      await wa.sendDocument(c.id, pdfUrl, filename, caption, ctx.phoneId, ctx.token);
+      sent++;
+    } catch (e) {
+      console.warn(`[PdfBlast] Failed ${c.id}:`, e.message);
+    }
+  }
+  res.json({ ok: true, sent, total: targets.length });
+});
+
+// POST /api/customers/import — bulk add existing contacts (students) to the list
+app.post("/api/customers/import", async (req, res) => {
+  const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
+  const { contacts = [] } = req.body;
+  if (!contacts.length) return res.status(400).json({ error: "No contacts provided" });
+
+  let imported = 0, skipped = 0;
+  for (const { name, phone } of contacts) {
+    const cleanPhone = (phone || "").replace(/[^0-9]/g, "");
+    if (cleanPhone.length < 10) { skipped++; continue; }
+    try {
+      await customers.touch(cleanPhone, {
+        name    : (name || "").trim() || "Contact",
+        source  : "manual_import",
+      }, bid);
+      imported++;
+    } catch (e) {
+      console.warn(`[Import] ${cleanPhone}:`, e.message);
+      skipped++;
+    }
+  }
+  res.json({ ok: true, imported, skipped });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
