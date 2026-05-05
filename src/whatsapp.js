@@ -129,6 +129,36 @@ async function sendVideo(to, videoUrl, caption = "", phoneId = PHONE_ID, token =
   return apiPost(`/${phoneId}/messages`, body, token);
 }
 
+// ── Send an image message ─────────────────────────────────────────────────────
+async function sendImage(to, imageUrl, caption = "", phoneId = PHONE_ID, token = WA_TOKEN) {
+  if (!token || !phoneId) {
+    console.log(`[WhatsApp MOCK] → ${to}: [IMAGE] ${imageUrl} — "${caption.slice(0, 60)}"`);
+    return;
+  }
+  const body = JSON.stringify({
+    messaging_product: "whatsapp",
+    to,
+    type: "image",
+    image: { link: imageUrl, caption: sanitize(caption) },
+  });
+  return apiPost(`/${phoneId}/messages`, body, token);
+}
+
+// ── Send a document (PDF / notes) ─────────────────────────────────────────────
+async function sendDocument(to, docUrl, filename = "Document.pdf", caption = "", phoneId = PHONE_ID, token = WA_TOKEN) {
+  if (!token || !phoneId) {
+    console.log(`[WhatsApp MOCK] → ${to}: [DOC] ${filename} — "${caption.slice(0, 60)}"`);
+    return;
+  }
+  const body = JSON.stringify({
+    messaging_product: "whatsapp",
+    to,
+    type: "document",
+    document: { link: docUrl, filename: filename.slice(0, 240), caption: sanitize(caption) },
+  });
+  return apiPost(`/${phoneId}/messages`, body, token);
+}
+
 function sanitize(text) { return text.slice(0, 4096); }
 
-module.exports = { send, sendProductCards, sendQuickReplies, sendInvoice, markReadAndType, sendVideo };
+module.exports = { send, sendProductCards, sendQuickReplies, sendInvoice, markReadAndType, sendVideo, sendImage, sendDocument };
