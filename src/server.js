@@ -172,11 +172,25 @@ app.post("/webhook/whatsapp", async (req, res) => {
             continue;
           }
 
-          // ── Image message — photo search for customers ────────────────────
+          // ── Image message — photo search (products) or forward to teacher (education)
           if (msgType === "image") {
             const imageUrl = msg.image?.url || msg.image?.id || "";
             if (imageUrl) {
-              await handlePhotoSearch(senderId, sess, imageUrl, name);
+              const imgSettings = await getSettings(routedBusinessId);
+              const imgIndustry = (imgSettings.industry || "").toLowerCase();
+              if (imgIndustry.includes("education") || imgIndustry.includes("tourism")) {
+                // Forward image query to business owner
+                const imgLang = sess.lang || "english";
+                const fwdMsg = {
+                  hindi   : `📸 आपकी image हमारी team को forward कर दी गई है। जल्द ही reply मिलेगा! 😊`,
+                  hinglish: `📸 Aapki image team ko forward ho gayi. Jald reply milega! 😊`,
+                  english : `📸 Your image has been forwarded to our team. We'll get back to you shortly! 😊`,
+                };
+                await send(senderId, fwdMsg[imgLang] || fwdMsg.english);
+                await notifyOwner(routedBusinessId, senderId, name, "[Image shared by student]", "query");
+              } else {
+                await handlePhotoSearch(senderId, sess, imageUrl, name);
+              }
               continue;
             }
           }
@@ -421,10 +435,14 @@ const GREETINGS = /^(hi+|hello+|hey+|helo|namaste|namaskar|hii+|sup|yo|ola|hola|
 async function handleSearch(customerId, sess, message, name) {
   const lang = sess.lang || "english";
 
-  // Bargain check in search state (e.g. "I want jeans for 400")
+  // Bargain check in search state — skip for education/tourism (no bargaining on courses)
   if (bargain.isBargaining(message) && sess.cart?.length) {
-    const item = sess.cart[sess.cart.length - 1];
-    return handleBargain(customerId, sess, item, message);
+    const bargainSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+    const bargainIndustry = (bargainSettings.industry || "").toLowerCase();
+    if (!bargainIndustry.includes("education") && !bargainIndustry.includes("tourism")) {
+      const item = sess.cart[sess.cart.length - 1];
+      return handleBargain(customerId, sess, item, message);
+    }
   }
 
   // Greeting → always show welcome, skip AI search
@@ -553,10 +571,13 @@ async function handleSearch(customerId, sess, message, name) {
   }
 
   if (sess.cart?.length) {
+    const cartBizSettings = await getSettings(bizId);
+    const cartBizInd      = (cartBizSettings.industry || "").toLowerCase();
+    const cartItemWord    = cartBizInd.includes("education") ? "course" : cartBizInd.includes("tourism") ? "package" : "item";
     const cartMsg = {
-      hindi   : `🛒 *Cart (${sess.cart.length} item):* ${sess.cart.map(i => i.name).join(", ")}`,
-      hinglish: `🛒 *Cart (${sess.cart.length} item):* ${sess.cart.map(i => i.name).join(", ")}`,
-      english : `🛒 *Cart (${sess.cart.length} item${sess.cart.length > 1 ? "s" : ""}):* ${sess.cart.map(i => i.name).join(", ")}`,
+      hindi   : `🛒 *Cart (${sess.cart.length} ${cartItemWord}):* ${sess.cart.map(i => i.name).join(", ")}`,
+      hinglish: `🛒 *Cart (${sess.cart.length} ${cartItemWord}):* ${sess.cart.map(i => i.name).join(", ")}`,
+      english : `🛒 *Selected (${sess.cart.length} ${cartItemWord}${sess.cart.length > 1 ? "s" : ""}):* ${sess.cart.map(i => i.name).join(", ")}`,
     };
     await send(customerId, cartMsg[lang] || cartMsg.english);
   }
@@ -603,7 +624,7 @@ async function handleSellyCart(customerId, sess, message, name) {
     const nf = {
       hindi   : `😕 Select किए हुए items नहीं मिले। कृपया दोबारा search करें।`,
       hinglish: `😕 Selected items nahi mile. Dobara search karo.`,
-      english : `😕 Couldn't find the items you selected. Please try searching again.`,
+      english : `😕 Couldn't find what you selected. Please try searching again.`,
     };
     return send(customerId, nf[lang] || nf.english);
   }
@@ -623,20 +644,26 @@ async function handleSellyCart(customerId, sess, message, name) {
   }).join("\n");
 
   const total    = merged.reduce((s, p) => s + (p.price || 0), 0);
-  const totalStr = total > 0 ? `\n\n💰 *Cart total: ₹${total.toLocaleString("en-IN")}*` : "";
+  const totalStr = total > 0 ? `\n\n💰 *Total: ₹${total.toLocaleString("en-IN")}*` : "";
 
   const notFoundStr = notFound.length
     ? `\n⚠️ Not found: ${notFound.map(n => `_${n}_`).join(", ")}`
     : "";
 
   const cartCountStr = merged.length > found.length
-    ? ` (${merged.length} total in cart)`
+    ? ` (${merged.length} total selected)`
     : "";
 
+  const cartSettings = await getSettings(bizId);
+  const cartInd      = (cartSettings.industry || "").toLowerCase();
+  const itemWord     = cartInd.includes("education") ? "course" : cartInd.includes("tourism") ? "package" : "item";
+  const itemWords    = cartInd.includes("education") ? "courses" : cartInd.includes("tourism") ? "packages" : "items";
+  const checkoutWord = cartInd.includes("education") ? "enroll" : "checkout";
+
   const confirmMsg = {
-    hindi   : `🛒 *${found.length} item cart में add हुए!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\n"done" reply करें checkout के लिए ✅\nया और items search करें 🔍`,
-    hinglish: `🛒 *${found.length} item cart mein add ho gaye!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\n"done" reply karo checkout ke liye ✅\nYa aur items search karo 🔍`,
-    english : `🛒 *${found.length} item${found.length > 1 ? "s" : ""} added to cart!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\nReply *"done"* to checkout ✅\nOr search for more items 🔍`,
+    hindi   : `🛒 *${found.length} ${itemWord} cart में add हुए!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\n"done" reply करें ${checkoutWord} के लिए ✅\nया और ${itemWords} search करें 🔍`,
+    hinglish: `🛒 *${found.length} ${itemWord} cart mein add ho gaye!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\n"done" reply karo ${checkoutWord} ke liye ✅\nYa aur ${itemWords} search karo 🔍`,
+    english : `🛒 *${found.length} ${itemWord}${found.length > 1 ? "s" : ""} added!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\nReply *"done"* to ${checkoutWord} ✅\nOr search for more ${itemWords} 🔍`,
   };
   return send(customerId, confirmMsg[lang] || confirmMsg.english);
 }
@@ -683,9 +710,16 @@ async function handleProductSelection(customerId, sess, message) {
   const msg  = message.toLowerCase().trim();
   const lang = sess.lang || "english";
 
-  if (msg === "done" || msg === "checkout" || msg === "buy") {
+  if (msg === "done" || msg === "checkout" || msg === "buy" || msg === "enroll") {
     if (!sess.cart?.length) {
-      const empty = { hindi: "Cart खाली है! पहले products search करें 😊", hinglish: "Cart empty hai! Pehle search karo 😊", english: "Your cart is empty! Search for products first 😊" };
+      const doneSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+      const doneInd      = (doneSettings.industry || "").toLowerCase();
+      const searchWord   = doneInd.includes("education") ? "courses" : doneInd.includes("tourism") ? "packages" : "products";
+      const empty = {
+        hindi   : `Cart खाली है! पहले ${searchWord} search करें 😊`,
+        hinglish: `Cart empty hai! Pehle ${searchWord} search karo 😊`,
+        english : `Nothing selected yet! Search for ${searchWord} first 😊`,
+      };
       return send(customerId, empty[lang] || empty.english);
     }
     return startSizing(customerId, sess);
@@ -746,8 +780,19 @@ async function handleProductSelection(customerId, sess, message) {
 
     const cart      = [...(sess.cart || [])];
     const alreadyIn = cart.find(i => i.id === product.id);
+
+    // Get industry for item word
+    const addSettings  = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+    const addInd       = (addSettings.industry || "").toLowerCase();
+    const addItemWord  = addInd.includes("education") ? "course" : addInd.includes("tourism") ? "package" : "item";
+    const addCheckout  = addInd.includes("education") ? "enroll" : "checkout";
+
     if (alreadyIn) {
-      const dup = { hindi: `"${product.name}" already cart में है! "done" reply करें checkout के लिए।`, hinglish: `"${product.name}" already cart mein hai! "done" reply karo checkout ke liye.`, english: `"${product.name}" is already in your cart! Reply "done" to checkout.` };
+      const dup = {
+        hindi   : `"${product.name}" already selected है! "done" reply करें ${addCheckout} के लिए।`,
+        hinglish: `"${product.name}" already selected hai! "done" reply karo ${addCheckout} ke liye.`,
+        english : `"${product.name}" is already selected! Reply "done" to ${addCheckout}.`,
+      };
       return send(customerId, dup[lang] || dup.english);
     }
 
@@ -755,9 +800,9 @@ async function handleProductSelection(customerId, sess, message) {
     session.update(customerId, { cart, state: "selecting", bargainRound: 0 });
 
     const added = {
-      hindi   : `✅ *${product.name}* cart में add हुआ!\n\n🛒 Cart: ${cart.length} item\n\nAur search करें या "done" reply करें checkout के लिए 👇`,
-      hinglish: `✅ *${product.name}* cart mein add ho gaya!\n\n🛒 Cart: ${cart.length} item\n\nAur search karo ya "done" reply karo checkout ke liye 👇`,
-      english : `✅ *${product.name}* added to cart!\n\n🛒 Cart: ${cart.length} item${cart.length > 1 ? "s" : ""}\n\nSearch more or reply "done" to checkout 👇`,
+      hindi   : `✅ *${product.name}* add हुआ!\n\n🛒 ${cart.length} ${addItemWord} selected\n\nAur search करें या "done" reply करें ${addCheckout} के लिए 👇`,
+      hinglish: `✅ *${product.name}* add ho gaya!\n\n🛒 ${cart.length} ${addItemWord} selected\n\nAur search karo ya "done" reply karo ${addCheckout} ke liye 👇`,
+      english : `✅ *${product.name}* added!\n\n🛒 ${cart.length} ${addItemWord}${cart.length > 1 ? "s" : ""} selected\n\nSearch more or reply "done" to ${addCheckout} 👇`,
     };
     return send(customerId, added[lang] || added.english);
   }
@@ -769,6 +814,14 @@ async function handleProductSelection(customerId, sess, message) {
 // ── Size Selection ─────────────────────────────────────────────────────────────
 async function startSizing(customerId, sess) {
   const lang         = sess.lang || "english";
+
+  // Education/tourism products don't have sizes — skip sizing entirely
+  const sizeSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+  const sizeIndustry = (sizeSettings.industry || "").toLowerCase();
+  if (sizeIndustry.includes("education") || sizeIndustry.includes("tourism")) {
+    return startAddressCollection(customerId, sess);
+  }
+
   const itemsNoSize  = (sess.cart || []).filter(i => i.hasSizes && !i.selectedSize);
 
   if (!itemsNoSize.length) return startAddressCollection(customerId, sess);
@@ -1112,7 +1165,7 @@ async function confirmOrder(customerId, order, isOnline = true) {
   const referralCode  = customer?.referralCode || "";
 
   // WhatsApp handoff line
-  const bizSettings_  = await getSettings(bizId);
+  const bizSettings_  = await getSettings(order.businessId || DEFAULT_BUSINESS_ID);
   const waNum         = (bizSettings_.whatsapp_number || "").replace(/[^0-9]/g, "");
   const waLine = waNum ? {
     hindi   : `\n💬 Koi sawaal? Direct chat: wa.me/${waNum}`,
@@ -1135,8 +1188,21 @@ async function confirmOrder(customerId, order, isOnline = true) {
   } : { hindi: "", hinglish: "", english: "" };
 
   const confirmTitle  = isEduConfirm ? "Enrollment" : "Order";
+
+  // If any enrolled course has an online class link, include it in confirmation
+  const classLinks = (order.cart || [])
+    .map(c => c.extraFields?.classLink || c.classLink)
+    .filter(Boolean);
+  const classLinkLine = classLinks.length
+    ? { hindi: `\n🔗 *Online Class Link:*\n${classLinks[0]}`, hinglish: `\n🔗 *Online Class Link:*\n${classLinks[0]}`, english: `\n🔗 *Online Class Link:*\n${classLinks[0]}` }
+    : { hindi: "", hinglish: "", english: "" };
+
   const trackingNote  = isEduConfirm
-    ? { hindi: "📚 Course details jald share kiye jaayenge.", hinglish: "📚 Course details jald share hongi.", english: "📚 Course details will be shared with you shortly." }
+    ? {
+        hindi   : classLinks.length ? "✅ Class link upar share ki gayi hai." : "📚 Course details jald share kiye jaayenge.",
+        hinglish: classLinks.length ? "✅ Class link upar share ki gayi hai." : "📚 Course details jald share hongi.",
+        english : classLinks.length ? "✅ Class link shared above — see you in class!" : "📚 Course details will be shared with you shortly.",
+      }
     : { hindi: "🚚 Tracking updates यहाँ आएंगे।\n\"track order\" reply करें status check करने के लिए।", hinglish: "🚚 Tracking updates yahan aayenge.\n\"track order\" reply karo status check karne ke liye.", english: "🚚 You'll get tracking updates here.\nReply \"track order\" anytime to check status." };
 
   const msgs = {
@@ -1146,6 +1212,7 @@ async function confirmOrder(customerId, order, isOnline = true) {
       `Amount: ₹${order.bill?.total}\n\n` +
       (codNote.hindi ? codNote.hindi + "\n\n" : "") +
       codOtpLine.hindi +
+      classLinkLine.hindi +
       `\n\n⭐ *${totalAwarded} Selly Points earned!*\n` +
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
@@ -1158,6 +1225,7 @@ async function confirmOrder(customerId, order, isOnline = true) {
       `Amount: ₹${order.bill?.total}\n\n` +
       (codNote.hinglish ? codNote.hinglish + "\n\n" : "") +
       codOtpLine.hinglish +
+      classLinkLine.hinglish +
       `\n\n⭐ *${totalAwarded} Selly Points mile!*\n` +
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
@@ -1170,6 +1238,7 @@ async function confirmOrder(customerId, order, isOnline = true) {
       `Amount: ₹${order.bill?.total}\n\n` +
       (codNote.english ? codNote.english + "\n\n" : "") +
       codOtpLine.english +
+      classLinkLine.english +
       `\n\n⭐ *${totalAwarded} Selly Points earned!*\n` +
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
@@ -1270,47 +1339,77 @@ async function handleLoyaltyCheck(customerId, sess) {
 async function handleTracking(customerId, sess, message) {
   const customerOrders = await orders.getByCustomer(customerId);
   const lang           = sess.lang || "english";
+  const trackSettings  = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+  const trackInd       = (trackSettings.industry || "").toLowerCase();
+  const isEduTrack     = trackInd.includes("education");
 
   if (!customerOrders.length) {
-    const none = { hindi: "अभी कोई order नहीं है! Shopping start करें 😊", hinglish: "Abhi koi order nahi hai! Shopping karo 😊", english: "You don't have any orders yet! Start shopping 😊" };
+    const none = {
+      hindi   : isEduTrack ? "अभी कोई enrollment नहीं है! Courses देखें 😊" : "अभी कोई order नहीं है! Shopping start करें 😊",
+      hinglish: isEduTrack ? "Abhi koi enrollment nahi hai! Courses dekho 😊"  : "Abhi koi order nahi hai! Shopping karo 😊",
+      english : isEduTrack ? "You don't have any enrollments yet! Browse courses 😊" : "You don't have any orders yet! Start shopping 😊",
+    };
     return send(customerId, none[lang] || none.english);
   }
 
-  return sendTrackingInfo(customerId, customerOrders[0]);
+  return sendTrackingInfo(customerId, customerOrders[0], isEduTrack);
 }
 
-async function sendTrackingInfo(customerId, order) {
-  const timeline = buildTimeline(order);
+async function sendTrackingInfo(customerId, order, isEdu = false) {
+  const timeline = buildTimeline(order, isEdu);
+  const title    = isEdu ? "🎓 ENROLLMENT" : "📦 ORDER";
+  const payLabel = order.paymentMode === "cod"
+    ? (isEdu ? "💵 Pay at Venue" : "💵 COD")
+    : "💳 Online";
   await send(customerId,
     `════════════════════════\n` +
-    `📦 ORDER #SL${order.id}\n` +
+    `${title} #SL${order.id}\n` +
     `════════════════════════\n` +
-    `${(order.cart || []).map(i => `${i.name}${i.selectedSize ? ` (${i.selectedSize})` : ""}`).join("\n")}\n` +
-    `Total: ₹${order.bill?.total}\n` +
-    `Payment: ${order.paymentMode === "cod" ? "💵 COD" : "💳 Online"}\n` +
+    `${(order.cart || []).map(i => `${i.name}`).join("\n")}\n` +
+    `${isEdu ? "Fees" : "Total"}: ₹${order.bill?.total}\n` +
+    `Payment: ${payLabel}\n` +
     `────────────────────────\n` +
     `${timeline}\n` +
     `════════════════════════\n` +
-    (order.trackingNumber ? `🔗 Track: ${order.trackingUrl || order.trackingNumber}` : "")
+    (!isEdu && order.trackingNumber ? `🔗 Track: ${order.trackingUrl || order.trackingNumber}` : "")
   );
 }
 
-function buildTimeline(order) {
-  const steps = [
-    { key: "confirmed",        label: "Order Placed",     emoji: "✅" },
-    { key: "packed",           label: "Packed",           emoji: "📦" },
-    { key: "shipped",          label: "Shipped",          emoji: "🚚" },
-    { key: "out_for_delivery", label: "Out for Delivery", emoji: "🛵" },
-    { key: "delivered",        label: "Delivered",        emoji: "✅" },
-  ];
+function buildTimeline(order, isEdu = false) {
+  const steps = isEdu
+    ? [
+        { key: "confirmed",    label: "Enrolled",      emoji: "✅" },
+        { key: "in_progress",  label: "In Progress",   emoji: "📖" },
+        { key: "completed",    label: "Completed",     emoji: "🏆" },
+      ]
+    : [
+        { key: "confirmed",        label: "Order Placed",     emoji: "✅" },
+        { key: "packed",           label: "Packed",           emoji: "📦" },
+        { key: "shipped",          label: "Shipped",          emoji: "🚚" },
+        { key: "out_for_delivery", label: "Out for Delivery", emoji: "🛵" },
+        { key: "delivered",        label: "Delivered",        emoji: "✅" },
+      ];
   const currentIdx = steps.findIndex(s => s.key === order.status);
   return steps.map((s, i) => `${i <= currentIdx ? s.emoji : "⏳"} ${s.label}`).join("\n");
 }
 
 async function handleReturn(customerId, sess, message) {
+  const lang        = sess.lang || "english";
+  const retSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+  const retInd      = (retSettings.industry || "").toLowerCase();
+
+  // Education/Tourism — no physical return; direct to support instead
+  if (retInd.includes("education") || retInd.includes("tourism")) {
+    const notApplicable = {
+      hindi   : `📞 कोई issue है? हमसे directly contact करें और हम help करेंगे।`,
+      hinglish: `📞 Koi issue hai? Directly contact karo, hum help karenge.`,
+      english : `📞 Have a concern? Please contact us directly and we'll be happy to help.`,
+    };
+    return send(customerId, notApplicable[lang] || notApplicable.english);
+  }
+
   const _cOrders = await orders.getByCustomer(customerId);
   const recent   = _cOrders.find(o => o.status === "delivered");
-  const lang     = sess.lang || "english";
   if (!recent) {
     const none = { hindi: "Return के लिए कोई delivered order नहीं है।", hinglish: "Return ke liye koi delivered order nahi hai.", english: "No delivered orders found to return." };
     return send(customerId, none[lang] || none.english);
@@ -1325,16 +1424,25 @@ async function handleReturn(customerId, sess, message) {
 }
 
 async function handleOrderHistory(customerId, sess) {
-  const lang      = sess.lang || "english";
-  const allOrders = await orders.getByCustomer(customerId);
+  const lang       = sess.lang || "english";
+  const histSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+  const histInd    = (histSettings.industry || "").toLowerCase();
+  const isEduHist  = histInd.includes("education");
+  const allOrders  = await orders.getByCustomer(customerId);
   if (!allOrders.length) {
-    const none = { hindi: "अभी कोई order नहीं। Shopping शुरू करें! 😊", hinglish: "Abhi koi order nahi. Shopping karo! 😊", english: "No orders yet! Start shopping 😊" };
+    const none = {
+      hindi   : isEduHist ? "अभी कोई enrollment नहीं। Courses देखें! 😊" : "अभी कोई order नहीं। Shopping शुरू करें! 😊",
+      hinglish: isEduHist ? "Abhi koi enrollment nahi. Courses dekho! 😊"  : "Abhi koi order nahi. Shopping karo! 😊",
+      english : isEduHist ? "No enrollments yet! Browse courses 😊"         : "No orders yet! Start shopping 😊",
+    };
     return send(customerId, none[lang] || none.english);
   }
   const list = allOrders.slice(0, 5).map(o =>
     `#SL${o.id} — ${(o.cart||[])[0]?.name} — ₹${o.bill?.total} — ${getStatusEmoji(o.status)} ${o.status}`
   ).join("\n");
-  const header = { hindi: `📋 *आपके Orders:*\n\n${list}`, hinglish: `📋 *Aapke Orders:*\n\n${list}`, english: `📋 *Your Orders:*\n\n${list}` };
+  const title  = isEduHist ? "📋 *आपके Enrollments:*" : "📋 *आपके Orders:*";
+  const titleE = isEduHist ? "📋 *Your Enrollments:*"  : "📋 *Your Orders:*";
+  const header = { hindi: `${title}\n\n${list}`, hinglish: `${title}\n\n${list}`, english: `${titleE}\n\n${list}` };
   await send(customerId, header[lang] || header.english);
 }
 
@@ -2060,7 +2168,7 @@ app.post("/api/settings", async (req, res) => {
 // ADMIN APIs — protected by ADMIN_SECRET env var
 // Only callable from the Selly admin account (codeforeai.app@gmail.com)
 // ─────────────────────────────────────────────────────────────────────────────
-const ADMIN_SECRET = "selly_admin_2024";
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "selly_admin_2024";
 
 function isAdmin(req) {
   return req.headers["x-admin-token"] === ADMIN_SECRET;

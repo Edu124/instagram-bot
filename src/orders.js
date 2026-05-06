@@ -153,8 +153,8 @@ async function getStats(businessId = DEFAULT_BID) {
       total        : all.length,
       pending      : all.filter(o => o.status === "pending_payment").length,
       confirmed    : all.filter(o => o.status === "confirmed").length,
-      shipped      : all.filter(o => o.status === "shipped").length,
-      delivered    : all.filter(o => o.status === "delivered").length,
+      shipped      : all.filter(o => o.status === "shipped" || o.status === "in_progress").length,
+      delivered    : all.filter(o => o.status === "delivered" || o.status === "completed").length,
       todayRevenue : all
         .filter(o => new Date(o.createdAt).toDateString() === today && o.status !== "pending_payment")
         .reduce((s, o) => s + (o.bill?.total || 0), 0),
