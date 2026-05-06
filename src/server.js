@@ -816,9 +816,23 @@ async function handleSizeSelection(customerId, sess, message) {
 
 // ── Address Collection ─────────────────────────────────────────────────────────
 async function startAddressCollection(customerId, sess) {
-  const lang = sess.lang || "english";
-  session.update(customerId, { state: "collecting_address" });
+  const lang     = sess.lang || "english";
+  const bizId    = sess.businessId || DEFAULT_BUSINESS_ID;
+  const settings = await getSettings(bizId);
+  const industry = (settings.industry || "").toLowerCase();
 
+  // Education & tourism don't need delivery address — skip to mobile collection
+  if (industry.includes("education") || industry.includes("tourism") || industry.includes("travel")) {
+    session.update(customerId, { address: "", state: "collecting_mobile" });
+    const msgs = {
+      hindi   : `📱 Enrollment confirmation ke liye aapka mobile number? (10 digit)`,
+      hinglish: `📱 Enrollment ke liye mobile number? (10 digit)`,
+      english : `📱 Your mobile number for enrollment confirmation? (10 digits)`,
+    };
+    return send(customerId, msgs[lang] || msgs.english);
+  }
+
+  session.update(customerId, { state: "collecting_address" });
   const msgs = {
     hindi:
       `📦 *लगभग हो गया!*\n\n` +
@@ -843,10 +857,15 @@ async function handleAddressCollection(customerId, sess, message) {
   const lang = sess.lang || "english";
   session.update(customerId, { address: message, state: "collecting_mobile" });
 
+  const bizId2    = sess.businessId || DEFAULT_BUSINESS_ID;
+  const settings2 = await getSettings(bizId2);
+  const industry2 = (settings2.industry || "").toLowerCase();
+  const isEdu     = industry2.includes("education");
+
   const msgs = {
-    hindi   : `📱 Delivery updates ke liye aapka mobile number? (10 digit)`,
-    hinglish: `📱 Delivery updates ke liye mobile number? (10 digit)`,
-    english : `📱 Your mobile number for delivery updates? (10 digits)`,
+    hindi   : isEdu ? `📱 Course updates ke liye aapka mobile number? (10 digit)` : `📱 Delivery updates ke liye aapka mobile number? (10 digit)`,
+    hinglish: isEdu ? `📱 Course updates ke liye mobile number? (10 digit)` : `📱 Delivery updates ke liye mobile number? (10 digit)`,
+    english : isEdu ? `📱 Your mobile number for course updates? (10 digits)` : `📱 Your mobile number for delivery updates? (10 digits)`,
   };
   await send(customerId, msgs[lang] || msgs.english);
 }
@@ -873,19 +892,24 @@ async function handleMobileCollection(customerId, sess, message) {
     }[lang] || "";
   }
 
+  const paySettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+  const payIndustry = (paySettings.industry || "").toLowerCase();
+  const isEduPay    = payIndustry.includes("education") || payIndustry.includes("tourism");
+  const cod2Label   = isEduPay ? "Pay at Venue / First Class" : "Cash on Delivery (COD) — ₹30 extra charge";
+
   const msgs = {
     hindi:
       `💳 *Payment method choose करें:*\n\n` +
       `1️⃣ Online (UPI / Card / Net Banking) — Razorpay\n` +
-      `2️⃣ 💵 Cash on Delivery (COD) — ₹30 extra charge${loyaltyLine}`,
+      `2️⃣ 💵 ${cod2Label}${loyaltyLine}`,
     hinglish:
       `💳 *Payment method choose karo:*\n\n` +
       `1️⃣ Online (UPI / Card / Net Banking) — Razorpay\n` +
-      `2️⃣ 💵 Cash on Delivery (COD) — ₹30 extra charge${loyaltyLine}`,
+      `2️⃣ 💵 ${cod2Label}${loyaltyLine}`,
     english:
       `💳 *Choose payment method:*\n\n` +
       `1️⃣ Online (UPI / Card / Net Banking) — Razorpay\n` +
-      `2️⃣ 💵 Cash on Delivery (COD) — ₹30 extra charge${loyaltyLine}`,
+      `2️⃣ 💵 ${cod2Label}${loyaltyLine}`,
   };
   await send(customerId, msgs[lang] || msgs.english);
 }
@@ -983,26 +1007,33 @@ async function placeOrder(customerId, sess, paymentMode) {
     (i.bargained ? " ✂️" : "")
   ).join("\n");
 
-  const discountLine = sess.loyaltyDiscount
-    ? `Loyalty Discount    -₹${sess.loyaltyDiscount}\n`
-    : "";
-  const codLine      = paymentMode === "cod" ? `COD Charge          ₹30\n` : "";
+  const industry     = (bizSettings.industry || "").toLowerCase();
+  const isEduOrder   = industry.includes("education") || industry.includes("tourism");
+  const discountLine = sess.loyaltyDiscount ? `Loyalty Discount    -₹${sess.loyaltyDiscount}\n` : "";
+  const codLine      = paymentMode === "cod" && !isEduOrder ? `COD Charge          ₹30\n` : "";
+  const deliveryLine = bill.delivery > 0 ? `Delivery        ₹${bill.delivery}\n` : "";
+  const addressLine  = sess.address ? `📍 ${sess.address}\n` : "";
+  const footerLine   = isEduOrder
+    ? `✅ Enrollment confirmed — we'll be in touch!\n`
+    : `🚚 Delivery in 3-5 days\n`;
+
+  const summaryTitle = isEduOrder ? `🎓 *ENROLLMENT SUMMARY*` : `🧾 *ORDER SUMMARY*`;
 
   const summary =
     `════════════════════════\n` +
-    `🧾 *ORDER SUMMARY*\n` +
+    `${summaryTitle}\n` +
     `════════════════════════\n` +
     `${itemLines}\n` +
     `────────────────────────\n` +
     `Subtotal        ₹${bill.subtotal}\n` +
-    `Delivery        ₹${bill.delivery}\n` +
+    `${deliveryLine}` +
     `GST (${bill.gstRate}%)      ₹${bill.gst}\n` +
     `${codLine}${discountLine}` +
     `────────────────────────\n` +
     `*TOTAL          ₹${bill.total}*\n` +
     `════════════════════════\n` +
-    `📍 ${sess.address}\n` +
-    `🚚 Delivery in 3-5 days\n` +
+    `${addressLine}` +
+    `${footerLine}` +
     `════════════════════════`;
 
   await send(customerId, summary);
@@ -1038,15 +1069,27 @@ async function confirmOrder(customerId, order, isOnline = true) {
 
   await orders.updateStatus(order.id, "confirmed");
 
-  // ── COD OTP — generate and send to customer ───────────────────────────────
+  // ── COD/Venue OTP — generate and send to customer ────────────────────────
+  const confirmSettings = await getSettings(order.businessId || DEFAULT_BUSINESS_ID);
+  const confirmIndustry = (confirmSettings.industry || "").toLowerCase();
+  const isEduConfirm    = confirmIndustry.includes("education") || confirmIndustry.includes("tourism");
+
   let codOtpLine = { hindi: "", hinglish: "", english: "" };
   if (order.paymentMode === "cod") {
     const otp = await otpMod.createCodOTP(order.id);
-    codOtpLine = {
-      hindi   : `\n🔐 *Delivery OTP: ${otp}*\n_(Delivery ke time yeh OTP delivery boy ko batana hai)_`,
-      hinglish: `\n🔐 *Delivery OTP: ${otp}*\n_(Share this OTP with the delivery person)_`,
-      english : `\n🔐 *Delivery OTP: ${otp}*\n_(Share this OTP when your order is delivered)_`,
-    };
+    if (isEduConfirm) {
+      codOtpLine = {
+        hindi   : `\n🔐 *Enrollment OTP: ${otp}*\n_(Pehli class mein yeh OTP batana hai)_`,
+        hinglish: `\n🔐 *Enrollment OTP: ${otp}*\n_(Share this OTP at your first class)_`,
+        english : `\n🔐 *Enrollment OTP: ${otp}*\n_(Share this OTP at your first class)_`,
+      };
+    } else {
+      codOtpLine = {
+        hindi   : `\n🔐 *Delivery OTP: ${otp}*\n_(Delivery ke time yeh OTP delivery boy ko batana hai)_`,
+        hinglish: `\n🔐 *Delivery OTP: ${otp}*\n_(Share this OTP with the delivery person)_`,
+        english : `\n🔐 *Delivery OTP: ${otp}*\n_(Share this OTP when your order is delivered)_`,
+      };
+    }
   }
 
   // Award loyalty points
@@ -1080,7 +1123,9 @@ async function confirmOrder(customerId, order, isOnline = true) {
   session.reset(customerId);
 
   const codNote  = order.paymentMode === "cod"
-    ? { hindi: "💵 Cash on delivery — delivery ke time payment karein.", hinglish: "💵 Cash on delivery — delivery ke time pay karna.", english: "💵 Pay cash on delivery when your order arrives." }
+    ? isEduConfirm
+      ? { hindi: "💵 Pehli class mein payment karein.", hinglish: "💵 Pehli class mein payment karna.", english: "💵 Pay at your first class." }
+      : { hindi: "💵 Cash on delivery — delivery ke time payment karein.", hinglish: "💵 Cash on delivery — delivery ke time pay karna.", english: "💵 Pay cash on delivery when your order arrives." }
     : { hindi: "", hinglish: "", english: "" };
 
   const refLine = referralCode ? {
@@ -1089,44 +1134,46 @@ async function confirmOrder(customerId, order, isOnline = true) {
     english : `\n🎟️ *Your Referral Code: ${referralCode}*\nShare with friends — earn 5% on every order they place!`,
   } : { hindi: "", hinglish: "", english: "" };
 
+  const confirmTitle  = isEduConfirm ? "Enrollment" : "Order";
+  const trackingNote  = isEduConfirm
+    ? { hindi: "📚 Course details jald share kiye jaayenge.", hinglish: "📚 Course details jald share hongi.", english: "📚 Course details will be shared with you shortly." }
+    : { hindi: "🚚 Tracking updates यहाँ आएंगे।\n\"track order\" reply करें status check करने के लिए।", hinglish: "🚚 Tracking updates yahan aayenge.\n\"track order\" reply karo status check karne ke liye.", english: "🚚 You'll get tracking updates here.\nReply \"track order\" anytime to check status." };
+
   const msgs = {
     hindi:
-      `✅ *Order Confirmed!* 🎉\n\n` +
-      `Order ID: *#SL${order.id}*\n` +
+      `✅ *${confirmTitle} Confirmed!* 🎉\n\n` +
+      `ID: *#SL${order.id}*\n` +
       `Amount: ₹${order.bill?.total}\n\n` +
       (codNote.hindi ? codNote.hindi + "\n\n" : "") +
       codOtpLine.hindi +
       `\n\n⭐ *${totalAwarded} Selly Points earned!*\n` +
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
-      `🚚 Tracking updates यहाँ आएंगे।\n` +
-      `"track order" reply करें status check करने के लिए।` +
+      trackingNote.hindi +
       refLine.hindi + waLine.hindi,
 
     hinglish:
-      `✅ *Order Confirm ho gaya!* 🎉\n\n` +
-      `Order ID: *#SL${order.id}*\n` +
+      `✅ *${confirmTitle} Confirm ho gaya!* 🎉\n\n` +
+      `ID: *#SL${order.id}*\n` +
       `Amount: ₹${order.bill?.total}\n\n` +
       (codNote.hinglish ? codNote.hinglish + "\n\n" : "") +
       codOtpLine.hinglish +
       `\n\n⭐ *${totalAwarded} Selly Points mile!*\n` +
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
-      `🚚 Tracking updates yahan aayenge.\n` +
-      `"track order" reply karo status check karne ke liye.` +
+      trackingNote.hinglish +
       refLine.hinglish + waLine.hinglish,
 
     english:
-      `✅ *Order Confirmed!* 🎉\n\n` +
-      `Order ID: *#SL${order.id}*\n` +
+      `✅ *${confirmTitle} Confirmed!* 🎉\n\n` +
+      `ID: *#SL${order.id}*\n` +
       `Amount: ₹${order.bill?.total}\n\n` +
       (codNote.english ? codNote.english + "\n\n" : "") +
       codOtpLine.english +
       `\n\n⭐ *${totalAwarded} Selly Points earned!*\n` +
       (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
       `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
-      `🚚 You'll get tracking updates here.\n` +
-      `Reply "track order" anytime to check status.` +
+      trackingNote.english +
       refLine.english + waLine.english,
   };
 

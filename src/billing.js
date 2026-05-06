@@ -11,8 +11,10 @@ const DEFAULTS = {
 
 // ── Generate bill object ──────────────────────────────────────────────────────
 function generate({ cart, address, mobile, name, businessGST, businessName, businessAddress,
-                    extra = 0, settings = {} }) {
-  const deliveryCharge = settings.delivery_charge ?? DEFAULTS.deliveryCharge;
+                    extra = 0, settings = {}, industry = "" }) {
+  const ind            = (industry || settings.industry || "").toLowerCase();
+  const noDelivery     = ind.includes("education") || ind.includes("tourism") || ind.includes("travel");
+  const deliveryCharge = noDelivery ? 0 : (settings.delivery_charge ?? DEFAULTS.deliveryCharge);
   const gstRate        = settings.gst_enabled !== false ? (settings.gst_rate ?? DEFAULTS.gstRate) : 0;
   const freeAbove      = settings.free_above   ?? DEFAULTS.freeAbove;
 
@@ -66,7 +68,7 @@ function toText(bill) {
     line,
     `Bill To: ${bill.customerName}`,
     `Mobile: ${bill.customerMobile}`,
-    `Deliver To: ${bill.deliveryAddress}`,
+    ...(bill.deliveryAddress ? [`Deliver To: ${bill.deliveryAddress}`] : []),
     line,
     itemLines,
     line,
@@ -112,7 +114,7 @@ function toHTML(bill) {
     <p>Date: ${bill.date} ${bill.time}</p>
     <hr/>
     <p><b>Bill To:</b> ${bill.customerName} | ${bill.customerMobile}</p>
-    <p><b>Deliver To:</b> ${bill.deliveryAddress}</p>
+    ${bill.deliveryAddress ? `<p><b>Deliver To:</b> ${bill.deliveryAddress}</p>` : ""}
 
     <table>
       <thead>
