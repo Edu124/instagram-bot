@@ -1751,13 +1751,25 @@ app.post("/api/orders/:id/status", async (req, res) => {
 app.get("/api/catalog/debug", async (req, res) => {
   const bid = getBid(req);
   const { supabaseAdmin: sa } = require("./supabase");
-  if (!sa) return res.json({ error: "supabaseAdmin not initialised — SERVICE_ROLE env var missing" });
-  // If bid=all, skip the filter so we can see ALL rows in the table
-  const q = (bid === "all")
-    ? sa.from("catalog").select("id,business_id,name,in_stock", { count: "exact" }).limit(20)
-    : sa.from("catalog").select("*", { count: "exact" }).eq("business_id", bid);
-  const { data, error, count } = await q;
-  res.json({ bid, error: error?.message || null, count, rows: data?.length, sample: data?.slice(0, 5) });
+  // Supabase check
+  let supaResult = { error: "not initialised" };
+  if (sa) {
+    const q = (bid === "all")
+      ? sa.from("catalog").select("id,business_id,name", { count: "exact" }).limit(10)
+      : sa.from("catalog").select("id,business_id,name", { count: "exact" }).eq("business_id", bid);
+    const { data, error, count } = await q;
+    supaResult = { error: error?.message || null, count, sample: data?.slice(0, 5) };
+  }
+  // Railway PG check
+  let pgResult = {};
+  try {
+    const db = require("./db");
+    const pgQ = (bid === "all")
+      ? await db.query("SELECT id, business_id, name FROM catalog LIMIT 10")
+      : await db.query("SELECT id, business_id, name FROM catalog WHERE business_id=$1 LIMIT 10", [bid]);
+    pgResult = { count: pgQ.rowCount, sample: pgQ.rows };
+  } catch (e) { pgResult = { error: e.message }; }
+  res.json({ bid, supabase: supaResult, railwayPG: pgResult });
 });
 
 app.get   ("/api/catalog",        async (req, res) => {
