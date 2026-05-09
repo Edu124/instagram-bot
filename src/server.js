@@ -1747,29 +1747,33 @@ app.post("/api/orders/:id/status", async (req, res) => {
 });
 
 // ── Catalog APIs ──────────────────────────────────────────────────────────────
-// Debug: raw Supabase catalog query — remove after fixing
-app.get("/api/catalog/debug", async (req, res) => {
-  const bid = getBid(req);
+// Debug: check Supabase orders + bot_customers column names — remove after fixing
+app.get("/api/debug/tables", async (req, res) => {
   const { supabaseAdmin: sa } = require("./supabase");
-  // Supabase check
-  let supaResult = { error: "not initialised" };
-  if (sa) {
-    const q = (bid === "all")
-      ? sa.from("catalog").select("id,business_id,name", { count: "exact" }).limit(10)
-      : sa.from("catalog").select("id,business_id,name", { count: "exact" }).eq("business_id", bid);
-    const { data, error, count } = await q;
-    supaResult = { error: error?.message || null, count, sample: data?.slice(0, 5) };
-  }
-  // Railway PG check
-  let pgResult = {};
-  try {
-    const db = require("./db");
-    const pgQ = (bid === "all")
-      ? await db.query("SELECT id, business_id, name FROM catalog LIMIT 10")
-      : await db.query("SELECT id, business_id, name FROM catalog WHERE business_id=$1 LIMIT 10", [bid]);
-    pgResult = { count: pgQ.rowCount, sample: pgQ.rows };
-  } catch (e) { pgResult = { error: e.message }; }
-  res.json({ bid, supabase: supaResult, railwayPG: pgResult });
+  if (!sa) return res.json({ error: "supabaseAdmin not initialised" });
+  // Fetch one row from each table to see actual column names
+  const [o, c] = await Promise.all([
+    sa.from("orders").select("*").limit(1),
+    sa.from("bot_customers").select("*").limit(1),
+  ]);
+  // Also try inserting a minimal test row to orders to catch exact schema errors
+  const testRow = {
+    id: "DEBUG_TEST_" + Date.now(),
+    business_id: "debug", customer_id: null, name: "test",
+    cart: [], address: "", mobile: "", bill: {}, pay_link: null,
+    payment_mode: "cod", status: "pending_payment", status_dates: {},
+    tracking_number: null, tracking_url: null, source: "whatsapp",
+    promo_source: null, commission: 0,
+  };
+  const ins = await sa.from("orders").insert(testRow).select().single();
+  // Clean up test row
+  if (!ins.error) await sa.from("orders").delete().eq("id", testRow.id);
+
+  res.json({
+    orders       : { cols: o.data?.[0] ? Object.keys(o.data[0]) : [], error: o.error?.message, rowCount: o.data?.length },
+    bot_customers: { cols: c.data?.[0] ? Object.keys(c.data[0]) : [], error: c.error?.message, rowCount: c.data?.length },
+    insertTest   : { ok: !ins.error, error: ins.error?.message },
+  });
 });
 
 app.get   ("/api/catalog",        async (req, res) => {
