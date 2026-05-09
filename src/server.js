@@ -328,6 +328,9 @@ async function routeMessage(customerId, sess, message, name) {
     case "collecting_mobile":
       return handleMobileCollection(customerId, sess, message);
 
+    case "verifying_mobile_otp":
+      return handleMobileOtpVerification(customerId, sess, message);
+
     case "choosing_payment":
       return handlePaymentChoice(customerId, sess, message);
 
@@ -550,12 +553,13 @@ async function handleSearch(customerId, sess, message, name) {
 
   await send(customerId, (header[lang] || header.english) + productList + (footer[lang] || footer.english));
 
-  // ── Shop link — send for all industries except Kirana ─────────────────────
+  // ── Shop link — send for product/tourism/food industries only ───────────────
+  // Skip for education (course list needs no photo gallery) and kirana (quick orders)
   try {
     const bizSettings = await getSettings(bizId);
     const industry    = bizSettings.industry || "product";
 
-    if (industry !== "kirana") {
+    if (industry !== "kirana" && !industry.includes("education")) {
       const BASE_URL = (process.env.BASE_URL || "https://instagram-bot-production-ef01.up.railway.app").replace(/\/$/, "");
       const shopUrl  = shop.buildShopUrl(BASE_URL, bizId, intent);
 
@@ -932,9 +936,60 @@ async function handleMobileCollection(customerId, sess, message) {
     return send(customerId, err[lang] || err.english);
   }
 
-  session.update(customerId, { mobile, state: "choosing_payment" });
+  // ── OTP verification — send OTP to the provided mobile number ────────────────
+  // Generates a 6-digit OTP and sends it to the number via WhatsApp so the
+  // customer proves they own it. Works for all industries.
+  const mobileOtp         = Math.floor(100000 + Math.random() * 900000).toString();
+  const mobileNormalized  = mobile.slice(-10);                  // last 10 digits
+  const mobileWithCountry = "91" + mobileNormalized;           // India prefix
 
-  // ── Check if customer has redeemable loyalty points ────────────────────────
+  session.update(customerId, { mobile: mobileNormalized, state: "verifying_mobile_otp", pendingMobileOtp: mobileOtp });
+
+  // Send OTP to the provided number on WhatsApp (best-effort — log errors but don't block)
+  try {
+    const ctx = _waCtx(customerId);
+    await wa.send(
+      mobileWithCountry,
+      `🔐 *Your Selly OTP: ${mobileOtp}*\n_(Valid for 10 minutes — do not share with anyone)_`,
+      ctx.phoneId, ctx.token
+    );
+  } catch (e) {
+    console.error("[OTP] Failed to send to mobile:", mobileWithCountry, e.message);
+  }
+
+  const otpSent = {
+    hindi   : `📱 *${mobileNormalized}* number pe OTP bheja gaya hai.\n\nWo OTP yahan enter karein:`,
+    hinglish: `📱 OTP sent to *${mobileNormalized}*.\n\nWo OTP yahan enter karo:`,
+    english : `📱 An OTP has been sent to *${mobileNormalized}*.\n\nPlease enter the OTP here to verify:`,
+  };
+  return send(customerId, otpSent[lang] || otpSent.english);
+}
+
+// ── Mobile OTP Verification ────────────────────────────────────────────────────
+async function handleMobileOtpVerification(customerId, sess, message) {
+  const lang  = sess.lang || "english";
+  const input = message.trim().replace(/\D/g, "");
+
+  if (input !== String(sess.pendingMobileOtp)) {
+    const err = {
+      hindi   : `❌ OTP गलत है। फिर से try करें।\n_(Type "cancel" to start over)_`,
+      hinglish: `❌ OTP galat hai. Dobara try karo.\n_(Type "cancel" to start over)_`,
+      english : `❌ Incorrect OTP. Please try again.\n_(Type "cancel" to start over)_`,
+    };
+    return send(customerId, err[lang] || err.english);
+  }
+
+  // OTP matched — proceed to payment selection
+  session.update(customerId, { state: "choosing_payment", pendingMobileOtp: null });
+
+  const ok = {
+    hindi   : `✅ *Mobile number verify हो गया!*`,
+    hinglish: `✅ *Mobile number verified!*`,
+    english : `✅ *Mobile number verified!*`,
+  };
+  await send(customerId, ok[lang] || ok.english);
+
+  // Show payment options (mirrors handleMobileCollection flow)
   const redeemInfo = await loyalty.getRedeemInfo(customerId);
   let loyaltyLine  = "";
   if (redeemInfo.canRedeem) {
@@ -964,8 +1019,9 @@ async function handleMobileCollection(customerId, sess, message) {
       `1️⃣ Online (UPI / Card / Net Banking) — Razorpay\n` +
       `2️⃣ 💵 ${cod2Label}${loyaltyLine}`,
   };
-  await send(customerId, msgs[lang] || msgs.english);
+  return send(customerId, msgs[lang] || msgs.english);
 }
+
 
 async function handlePaymentChoice(customerId, sess, message) {
   const lang = sess.lang || "english";
@@ -1205,6 +1261,20 @@ async function confirmOrder(customerId, order, isOnline = true) {
       }
     : { hindi: "🚚 Tracking updates यहाँ आएंगे।\n\"track order\" reply करें status check करने के लिए।", hinglish: "🚚 Tracking updates yahan aayenge.\n\"track order\" reply karo status check karne ke liye.", english: "🚚 You'll get tracking updates here.\nReply \"track order\" anytime to check status." };
 
+  // Loyalty lines: skip for education/tourism — they don't use a points programme
+  const loyaltyHindi    = isEduConfirm ? "" :
+    `\n\n⭐ *${totalAwarded} Selly Points earned!*\n` +
+    (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
+    `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n`;
+  const loyaltyHinglish = isEduConfirm ? "" :
+    `\n\n⭐ *${totalAwarded} Selly Points mile!*\n` +
+    (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
+    `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n`;
+  const loyaltyEnglish  = isEduConfirm ? "" :
+    `\n\n⭐ *${totalAwarded} Selly Points earned!*\n` +
+    (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
+    `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n`;
+
   const msgs = {
     hindi:
       `✅ *${confirmTitle} Confirmed!* 🎉\n\n` +
@@ -1213,10 +1283,8 @@ async function confirmOrder(customerId, order, isOnline = true) {
       (codNote.hindi ? codNote.hindi + "\n\n" : "") +
       codOtpLine.hindi +
       classLinkLine.hindi +
-      `\n\n⭐ *${totalAwarded} Selly Points earned!*\n` +
-      (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
-      `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
-      trackingNote.hindi +
+      loyaltyHindi +
+      `\n${trackingNote.hindi}\n` +
       refLine.hindi + waLine.hindi,
 
     hinglish:
@@ -1226,10 +1294,8 @@ async function confirmOrder(customerId, order, isOnline = true) {
       (codNote.hinglish ? codNote.hinglish + "\n\n" : "") +
       codOtpLine.hinglish +
       classLinkLine.hinglish +
-      `\n\n⭐ *${totalAwarded} Selly Points mile!*\n` +
-      (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
-      `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
-      trackingNote.hinglish +
+      loyaltyHinglish +
+      `\n${trackingNote.hinglish}\n` +
       refLine.hinglish + waLine.hinglish,
 
     english:
@@ -1239,10 +1305,8 @@ async function confirmOrder(customerId, order, isOnline = true) {
       (codNote.english ? codNote.english + "\n\n" : "") +
       codOtpLine.english +
       classLinkLine.english +
-      `\n\n⭐ *${totalAwarded} Selly Points earned!*\n` +
-      (bonusPoints ? `🎁 +${bonusPoints} first order bonus!\n` : "") +
-      `Balance: ${loyaltyRecord.points} pts ${tier.emoji}\n\n` +
-      trackingNote.english +
+      loyaltyEnglish +
+      `\n${trackingNote.english}\n` +
       refLine.english + waLine.english,
   };
 

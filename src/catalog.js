@@ -76,20 +76,28 @@ async function search(intent = {}, businessId = DEFAULT_BID) {
   let results = all.filter(p => p.inStock);
 
   if (intent.product) {
-    const raw      = intent.product.toLowerCase();
-    const keywords = raw.split(" ").filter(k => k.length > 1).map(kw => {
+    const raw       = intent.product.toLowerCase();
+    const originals = raw.split(" ").filter(k => k.length > 1);
+    const keywords  = originals.map(kw => {
       if (kw.endsWith("ies")) return kw.slice(0, -3) + "y";
       if (kw.endsWith("es"))  return kw.slice(0, -2);
       if (kw.endsWith("s"))   return kw.slice(0, -1);
       return kw;
     });
-    results = results.filter(p => {
+
+    // Score-based matching: at least 1 keyword must match, more matches = higher rank.
+    // This handles partial course names like "Algebra" matching "Algebra Standard 9th",
+    // and "9th math" matching "Mathematics Standard 9th" (both words appear somewhere).
+    const scored = results.map(p => {
       const searchable = [p.name, p.category, p.description, ...(p.tags || [])].join(" ").toLowerCase();
-      return keywords.every((stem, i) => {
-        const original = intent.product.toLowerCase().split(" ").filter(k => k.length > 1)[i];
-        return searchable.includes(stem) || searchable.includes(original);
+      let score = 0;
+      keywords.forEach((stem, i) => {
+        if (searchable.includes(stem) || searchable.includes(originals[i] || stem)) score++;
       });
-    });
+      return { p, score };
+    }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+
+    results = scored.map(x => x.p);
   }
 
   if (intent.color)    { const c = intent.color.toLowerCase();    results = results.filter(p => !p.colors?.length  || p.colors.some(x  => x.toLowerCase().includes(c))); }
