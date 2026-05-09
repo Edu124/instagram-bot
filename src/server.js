@@ -1616,6 +1616,22 @@ app.get ("/api/customers/:id",   async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET /api/orders — paginated order list for the app dashboard
+// Uses supabaseAdmin so it bypasses RLS and works regardless of how business_id was set
+app.get("/api/orders", async (req, res) => {
+  try {
+    const bid    = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
+    const status = req.query.status || null;
+    const page   = parseInt(req.query.page  || "1",  10);
+    const limit  = parseInt(req.query.limit || "20", 10);
+    const [result, stats] = await Promise.all([
+      orders.getAll({ status, page, limit, businessId: bid }),
+      orders.getStats(bid),
+    ]);
+    res.json({ ...result, stats });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post("/api/orders/:id/status", async (req, res) => {
   const { status: newStatus, trackingNumber, trackingUrl } = req.body;
   const updated = await orders.updateStatus(req.params.id, newStatus, { trackingNumber, trackingUrl });
