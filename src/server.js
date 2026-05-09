@@ -1747,6 +1747,15 @@ app.post("/api/orders/:id/status", async (req, res) => {
 });
 
 // ── Catalog APIs ──────────────────────────────────────────────────────────────
+// Debug: raw Supabase catalog query — remove after fixing
+app.get("/api/catalog/debug", async (req, res) => {
+  const bid = getBid(req);
+  const { supabaseAdmin: sa } = require("./supabase");
+  if (!sa) return res.json({ error: "supabaseAdmin not initialised — SERVICE_ROLE env var missing" });
+  const { data, error, count } = await sa.from("catalog").select("*", { count: "exact" }).eq("business_id", bid);
+  res.json({ bid, error: error?.message || null, count, rows: data?.length, sample: data?.slice(0, 2) });
+});
+
 app.get   ("/api/catalog",        async (req, res) => {
   try { res.json({ products: await catalog.getAll(getBid(req)) }); } catch (e) { res.status(500).json({ error: e.message }); }
 });
