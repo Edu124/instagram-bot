@@ -2212,6 +2212,7 @@ app.post("/api/settings", async (req, res) => {
     "business_name","business_gst_no","business_address",
     "gst_enabled","gst_rate","delivery_charge","free_above","cod_fee",
     "whatsapp_number","shiprocket_email","shiprocket_password","delhivery_api_key",
+    "industry",
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {

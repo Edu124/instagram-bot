@@ -162,6 +162,7 @@ async function setup() {
       shiprocket_email     TEXT NOT NULL DEFAULT '',
       shiprocket_password  TEXT NOT NULL DEFAULT '',
       delhivery_api_key    TEXT NOT NULL DEFAULT '',
+      industry             TEXT NOT NULL DEFAULT 'product',
       updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
@@ -170,6 +171,7 @@ async function setup() {
   await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS shiprocket_email    TEXT NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS shiprocket_password TEXT NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS delhivery_api_key   TEXT NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS industry            TEXT NOT NULL DEFAULT 'product'`);
 
   // ── wishlists ─────────────────────────────────────────────────────────────────
   await db.query(`
