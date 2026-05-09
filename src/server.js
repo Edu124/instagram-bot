@@ -1747,34 +1747,6 @@ app.post("/api/orders/:id/status", async (req, res) => {
 });
 
 // ── Catalog APIs ──────────────────────────────────────────────────────────────
-// Debug: check Supabase orders + bot_customers column names — remove after fixing
-app.get("/api/debug/tables", async (req, res) => {
-  const { supabaseAdmin: sa } = require("./supabase");
-  if (!sa) return res.json({ error: "supabaseAdmin not initialised" });
-  // Fetch one row from each table to see actual column names
-  const [o, c] = await Promise.all([
-    sa.from("orders").select("*").limit(1),
-    sa.from("bot_customers").select("*").limit(1),
-  ]);
-  // Also try inserting a minimal test row to orders to catch exact schema errors
-  const testRow = {
-    id: "DEBUG_TEST_" + Date.now(),
-    business_id: "debug", customer_id: null, name: "test",
-    cart: [], address: "", mobile: "", bill: {}, pay_link: null,
-    payment_mode: "cod", status: "pending_payment", status_dates: {},
-    tracking_number: null, tracking_url: null, source: "whatsapp",
-    promo_source: null, commission: 0,
-  };
-  const ins = await sa.from("orders").insert(testRow).select().single();
-  // Clean up test row
-  if (!ins.error) await sa.from("orders").delete().eq("id", testRow.id);
-
-  res.json({
-    orders       : { cols: o.data?.[0] ? Object.keys(o.data[0]) : [], error: o.error?.message, rowCount: o.data?.length },
-    bot_customers: { cols: c.data?.[0] ? Object.keys(c.data[0]) : [], error: c.error?.message, rowCount: c.data?.length },
-    insertTest   : { ok: !ins.error, error: ins.error?.message },
-  });
-});
 
 app.get   ("/api/catalog",        async (req, res) => {
   try { res.json({ products: await catalog.getAll(getBid(req)) }); } catch (e) { res.status(500).json({ error: e.message }); }

@@ -172,6 +172,7 @@ async function getStats(businessId = DEFAULT_BID) {
 function _toOrder(row) {
   return {
     id             : row.id,
+    businessId     : row.business_id    || "",
     customerId     : row.customer_id,
     name           : row.name           || "",
     cart           : row.cart           || [],
