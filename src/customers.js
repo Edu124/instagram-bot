@@ -268,7 +268,7 @@ async function bulkImport(contacts, businessId = DEFAULT_BID) {
 
   const { error } = await supabaseAdmin
     .from("bot_customers")
-    .upsert(rows, { onConflict: "id,business_id", ignoreDuplicates: true });
+    .upsert(rows, { onConflict: "id", ignoreDuplicates: true });
 
   if (error) throw new Error(error.message);
   return { imported: rows.length, skipped };

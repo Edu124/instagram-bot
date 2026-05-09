@@ -1693,6 +1693,32 @@ app.get ("/api/customers/:id",   async (req, res) => {
 
 // (duplicate GET /api/orders removed — the handler at line ~1582 handles this)
 
+// ── Send custom WhatsApp message to a customer (owner → student/customer) ─────
+app.post("/api/customers/:id/message", async (req, res) => {
+  const customerId = req.params.id;
+  const bid        = getBid(req);
+  const { message } = req.body || {};
+  if (!message) return res.status(400).json({ error: "message required" });
+  try {
+    // Look up which WhatsApp number is registered for this business
+    const numInfo = await waNumbers.getByBusinessId(bid);
+    const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
+    const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
+    if (!phoneId || !token) return res.status(503).json({ error: "WhatsApp not configured for this business" });
+
+    // customerId IS the WhatsApp number (phone without country code or with)
+    // Normalise: ensure it starts with country code (assume India 91 if 10 digits)
+    let toNumber = customerId.replace(/[^0-9]/g, "");
+    if (toNumber.length === 10) toNumber = "91" + toNumber;
+
+    await wa.send(toNumber, message, phoneId, token);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("[CustomerMsg] error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/orders/:id/status", async (req, res) => {
   const { status: newStatus, trackingNumber, trackingUrl } = req.body;
   const updated = await orders.updateStatus(req.params.id, newStatus, { trackingNumber, trackingUrl });
