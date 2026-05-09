@@ -237,4 +237,41 @@ function _toCustomer(row) {
   };
 }
 
-module.exports = { touch, recordOrder, creditReferral, get, getAll, getByReferralCode, getStats };
+// ── Bulk import contacts (phone book / manual CSV) ────────────────────────────
+// Single Supabase upsert instead of N sequential SELECT+INSERT calls.
+// ignoreDuplicates keeps existing bot customers intact (their order history, tags etc.)
+async function bulkImport(contacts, businessId = DEFAULT_BID) {
+  const rows = contacts
+    .map(({ name, phone }) => {
+      const id = (phone || "").replace(/[^0-9]/g, "");
+      if (id.length < 10) return null;
+      return {
+        id,
+        business_id      : businessId,
+        name             : (name || "").trim() || "Contact",
+        source           : "manual_import",
+        referral_code    : ((name || "").slice(0, 4).toUpperCase() || "REF") + Math.random().toString(36).slice(2, 6).toUpperCase(),
+        referral_count   : 0,
+        referral_earnings: 0,
+        total_orders     : 0,
+        total_spend      : 0,
+        first_seen_at    : Date.now(),
+        last_active_at   : Date.now(),
+        order_ids        : [],
+        tags             : [],
+      };
+    })
+    .filter(Boolean);
+
+  const skipped = contacts.length - rows.length;
+  if (!rows.length) return { imported: 0, skipped };
+
+  const { error } = await supabaseAdmin
+    .from("bot_customers")
+    .upsert(rows, { onConflict: "id,business_id", ignoreDuplicates: true });
+
+  if (error) throw new Error(error.message);
+  return { imported: rows.length, skipped };
+}
+
+module.exports = { touch, recordOrder, creditReferral, get, getAll, getByReferralCode, getStats, bulkImport };

@@ -2023,27 +2023,19 @@ app.post("/api/promote/pdf", async (req, res) => {
 });
 
 // POST /api/customers/import — bulk add existing contacts (students) to the list
+// Uses a single Supabase upsert (not N sequential queries) so even 500 contacts
+// completes in ~1 second instead of timing out.
 app.post("/api/customers/import", async (req, res) => {
   const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
   const { contacts = [] } = req.body;
   if (!contacts.length) return res.status(400).json({ error: "No contacts provided" });
-
-  let imported = 0, skipped = 0;
-  for (const { name, phone } of contacts) {
-    const cleanPhone = (phone || "").replace(/[^0-9]/g, "");
-    if (cleanPhone.length < 10) { skipped++; continue; }
-    try {
-      await customers.touch(cleanPhone, {
-        name    : (name || "").trim() || "Contact",
-        source  : "manual_import",
-      }, bid);
-      imported++;
-    } catch (e) {
-      console.warn(`[Import] ${cleanPhone}:`, e.message);
-      skipped++;
-    }
+  try {
+    const result = await customers.bulkImport(contacts, bid);
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    console.error("[Import] bulk import error:", e.message);
+    res.status(500).json({ error: e.message });
   }
-  res.json({ ok: true, imported, skipped });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
