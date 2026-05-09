@@ -1571,7 +1571,18 @@ function isReferralRequest(msg) {
   return m.includes("referral") || m.includes("refer") || m.includes("my code");
 }
 function getStatusEmoji(s) {
-  const map = { pending_payment:"⏳", confirmed:"✅", packed:"📦", shipped:"🚚", out_for_delivery:"🛵", delivered:"✅", return_requested:"🔄", cancelled:"❌" };
+  const map = {
+    pending_payment  : "⏳",
+    confirmed        : "✅",
+    packed           : "📦",
+    shipped          : "🚚",
+    out_for_delivery : "🛵",
+    delivered        : "✅",
+    in_progress      : "📖",   // education: active / in progress
+    completed        : "🏆",   // education: course completed
+    return_requested : "🔄",
+    cancelled        : "❌",
+  };
   return map[s] || "📋";
 }
 
@@ -1616,21 +1627,7 @@ app.get ("/api/customers/:id",   async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /api/orders — paginated order list for the app dashboard
-// Uses supabaseAdmin so it bypasses RLS and works regardless of how business_id was set
-app.get("/api/orders", async (req, res) => {
-  try {
-    const bid    = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
-    const status = req.query.status || null;
-    const page   = parseInt(req.query.page  || "1",  10);
-    const limit  = parseInt(req.query.limit || "20", 10);
-    const [result, stats] = await Promise.all([
-      orders.getAll({ status, page, limit, businessId: bid }),
-      orders.getStats(bid),
-    ]);
-    res.json({ ...result, stats });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+// (duplicate GET /api/orders removed — the handler at line ~1582 handles this)
 
 app.post("/api/orders/:id/status", async (req, res) => {
   const { status: newStatus, trackingNumber, trackingUrl } = req.body;
