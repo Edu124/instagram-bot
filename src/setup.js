@@ -147,6 +147,10 @@ async function setup() {
   await db.query(`CREATE INDEX IF NOT EXISTS status_logs_posted_idx ON status_logs(posted_at)`);
 
   // ── business_settings ─────────────────────────────────────────────────────────
+  // NOTE: business_settings lives in Supabase (read/written via supabaseAdmin +
+  // the app's supabase_data.js). This Railway-PG copy is kept only so the table
+  // exists if anything accidentally queries Railway PG, but the authoritative
+  // data is always in Supabase. Schema changes must be applied in Supabase SQL editor.
   await db.query(`
     CREATE TABLE IF NOT EXISTS business_settings (
       business_id          TEXT PRIMARY KEY,
@@ -166,12 +170,6 @@ async function setup() {
       updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
-  // Add new columns if upgrading existing table
-  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS whatsapp_number     TEXT NOT NULL DEFAULT ''`);
-  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS shiprocket_email    TEXT NOT NULL DEFAULT ''`);
-  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS shiprocket_password TEXT NOT NULL DEFAULT ''`);
-  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS delhivery_api_key   TEXT NOT NULL DEFAULT ''`);
-  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS industry            TEXT NOT NULL DEFAULT 'product'`);
 
   // ── wishlists ─────────────────────────────────────────────────────────────────
   await db.query(`
