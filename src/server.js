@@ -1752,8 +1752,12 @@ app.get("/api/catalog/debug", async (req, res) => {
   const bid = getBid(req);
   const { supabaseAdmin: sa } = require("./supabase");
   if (!sa) return res.json({ error: "supabaseAdmin not initialised — SERVICE_ROLE env var missing" });
-  const { data, error, count } = await sa.from("catalog").select("*", { count: "exact" }).eq("business_id", bid);
-  res.json({ bid, error: error?.message || null, count, rows: data?.length, sample: data?.slice(0, 2) });
+  // If bid=all, skip the filter so we can see ALL rows in the table
+  const q = (bid === "all")
+    ? sa.from("catalog").select("id,business_id,name,in_stock", { count: "exact" }).limit(20)
+    : sa.from("catalog").select("*", { count: "exact" }).eq("business_id", bid);
+  const { data, error, count } = await q;
+  res.json({ bid, error: error?.message || null, count, rows: data?.length, sample: data?.slice(0, 5) });
 });
 
 app.get   ("/api/catalog",        async (req, res) => {
