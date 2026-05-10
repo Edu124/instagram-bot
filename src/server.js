@@ -492,24 +492,26 @@ async function handleSearch(customerId, sess, message, name) {
     return send(customerId, greets[lang] || greets.english);
   }
 
+  const bizId = sess.businessId || DEFAULT_BUSINESS_ID;
+
+  // ── Location query — check BEFORE AI so "location" isn't treated as a product search
+  const isLocationQuery = /\b(location|address|kahan|kahaan|where are you|directions?|maps?|gps|kaise aayein|kaise aaye|office|institute|center|centre|branch|adress|addres)\b/i.test(message);
+  if (isLocationQuery) {
+    const locSettings = await getSettings(bizId);
+    const locUrl      = (locSettings.location_url || "").trim();
+    if (locUrl) {
+      const locMsg = {
+        hindi   : `📍 *हमारा पता / Location:*\n\n${locUrl}`,
+        hinglish: `📍 *Hamare yahan aane ke liye:*\n\n${locUrl}`,
+        english : `📍 *Our Location:*\n\n${locUrl}`,
+      };
+      return send(customerId, locMsg[lang] || locMsg.english);
+    }
+  }
+
   const intent = await ai.extractSearchIntent(message);
-  const bizId  = sess.businessId || DEFAULT_BUSINESS_ID;
 
   if (!intent.product) {
-    // ── Location query — reply with stored maps link if available ─────────────
-    const isLocationQuery = /\b(location|address|kahan|kahaan|where|directions?|maps?|gps|kaise aayein|kaise aaye|office|institute|center|centre|branch|adress|addres)\b/i.test(message);
-    if (isLocationQuery) {
-      const locSettings = await getSettings(bizId);
-      const locUrl      = (locSettings.location_url || "").trim();
-      if (locUrl) {
-        const locMsg = {
-          hindi   : `📍 *हमारा पता / Location:*\n\n${locUrl}`,
-          hinglish: `📍 *Hamare yahan aane ke liye:*\n\n${locUrl}`,
-          english : `📍 *Our Location:*\n\n${locUrl}`,
-        };
-        return send(customerId, locMsg[lang] || locMsg.english);
-      }
-    }
 
     // Not a product search — customer asked something else (delivery, timings, etc.)
     // Tell customer their query is forwarded, then notify the owner.
