@@ -800,6 +800,23 @@ async function handleProductSelection(customerId, sess, message) {
       return send(customerId, dup[lang] || dup.english);
     }
 
+    // ── Duplicate enrollment guard (education / tourism only) ─────────────────
+    if (addInd.includes("education") || addInd.includes("tourism")) {
+      const prevOrders = await orders.getByCustomer(customerId);
+      const alreadyEnrolled = prevOrders.some(o =>
+        !["cancelled", "refunded"].includes(o.status) &&
+        (o.cart || []).some(item => item.id === product.id)
+      );
+      if (alreadyEnrolled) {
+        const alreadyMsg = {
+          hindi   : `✅ Aap *${product.name}* mein already enrolled hain!\n\nDobara enrollment ki zaroorat nahi. Koi sawaal ho toh directly contact karein.`,
+          hinglish: `✅ You are already enrolled in *${product.name}*!\n\nNo need to enroll again. Contact us if you need help.`,
+          english : `✅ You are already enrolled in *${product.name}*!\n\nNo duplicate enrollment needed. Contact us if you have any questions.`,
+        };
+        return send(customerId, alreadyMsg[lang] || alreadyMsg.english);
+      }
+    }
+
     cart.push({ ...product, selectedSize: null });
     session.update(customerId, { cart, state: "selecting", bargainRound: 0 });
 
@@ -990,33 +1007,39 @@ async function handleMobileOtpVerification(customerId, sess, message) {
   await send(customerId, ok[lang] || ok.english);
 
   // Show payment options (mirrors handleMobileCollection flow)
+  const paySettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+  const payIndustry = (paySettings.industry || "").toLowerCase();
+  const isEduPay    = payIndustry.includes("education") || payIndustry.includes("tourism");
+
   const redeemInfo = await loyalty.getRedeemInfo(customerId);
   let loyaltyLine  = "";
-  if (redeemInfo.canRedeem) {
+  if (redeemInfo.canRedeem && !isEduPay) {
     loyaltyLine = {
       hindi   : `\n⭐ *Loyalty Points:* ${redeemInfo.points} pts → ₹${redeemInfo.maxDiscount} off available!\nReply *USE POINTS* to redeem before payment.`,
       hinglish: `\n⭐ *Loyalty Points:* ${redeemInfo.points} pts → ₹${redeemInfo.maxDiscount} off available!\n*USE POINTS* reply karo redeem karne ke liye.`,
       english : `\n⭐ *Loyalty Points:* ${redeemInfo.points} pts → ₹${redeemInfo.maxDiscount} off available!\nReply *USE POINTS* to redeem before paying.`,
     }[lang] || "";
   }
-
-  const paySettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
-  const payIndustry = (paySettings.industry || "").toLowerCase();
-  const isEduPay    = payIndustry.includes("education") || payIndustry.includes("tourism");
   const cod2Label   = isEduPay ? "Pay at Venue / First Class" : "Cash on Delivery (COD) — ₹30 extra charge";
+
+  // Show UPI/bank as online option if the business has configured payment details
+  const hasUpiOrBank = !!(paySettings.upi_id || paySettings.bank_details);
+  const online1Label = isEduPay && hasUpiOrBank
+    ? `Online — Pay via UPI / Bank Transfer`
+    : `Online (UPI / Card / Net Banking) — Razorpay`;
 
   const msgs = {
     hindi:
       `💳 *Payment method choose करें:*\n\n` +
-      `1️⃣ Online (UPI / Card / Net Banking) — Razorpay\n` +
+      `1️⃣ ${online1Label}\n` +
       `2️⃣ 💵 ${cod2Label}${loyaltyLine}`,
     hinglish:
       `💳 *Payment method choose karo:*\n\n` +
-      `1️⃣ Online (UPI / Card / Net Banking) — Razorpay\n` +
+      `1️⃣ ${online1Label}\n` +
       `2️⃣ 💵 ${cod2Label}${loyaltyLine}`,
     english:
       `💳 *Choose payment method:*\n\n` +
-      `1️⃣ Online (UPI / Card / Net Banking) — Razorpay\n` +
+      `1️⃣ ${online1Label}\n` +
       `2️⃣ 💵 ${cod2Label}${loyaltyLine}`,
   };
   return send(customerId, msgs[lang] || msgs.english);
@@ -1063,6 +1086,9 @@ async function placeOrder(customerId, sess, paymentMode) {
   const bizId = sess.businessId || DEFAULT_BUSINESS_ID;
 
   const bizSettings = await getSettings(bizId);
+  // Compute industry here — needed both for billing (cod_fee) and order status
+  const industry   = (bizSettings.industry || "").toLowerCase();
+  const isEduOrder = industry.includes("education") || industry.includes("tourism");
   const bill = billing.generate({
     cart            : sess.cart,
     address         : sess.address,
@@ -1071,7 +1097,7 @@ async function placeOrder(customerId, sess, paymentMode) {
     businessName    : bizSettings.business_name,
     businessGST     : bizSettings.business_gst_no,
     businessAddress : bizSettings.business_address,
-    extra           : paymentMode === "cod" ? (bizSettings.cod_fee ?? 30) : 0,
+    extra           : paymentMode === "cod" && !isEduOrder ? (bizSettings.cod_fee ?? 30) : 0,
     settings        : bizSettings,
   });
 
@@ -1097,7 +1123,9 @@ async function placeOrder(customerId, sess, paymentMode) {
     mobile     : sess.mobile,
     bill,
     paymentMode,
-    status     : paymentMode === "cod" ? "confirmed" : "pending_payment",
+    // Education/tourism "Pay at Venue" stays pending_payment until owner confirms fee payment.
+    // Regular COD products are confirmed immediately.
+    status     : paymentMode === "cod" && !isEduOrder ? "confirmed" : "pending_payment",
     promoSource,
     commission : commResult.commissionAmount || 0,
   }, bizId);
@@ -1116,15 +1144,16 @@ async function placeOrder(customerId, sess, paymentMode) {
     (i.bargained ? " ✂️" : "")
   ).join("\n");
 
-  const industry     = (bizSettings.industry || "").toLowerCase();
-  const isEduOrder   = industry.includes("education") || industry.includes("tourism");
+  // isEduOrder already computed above (before order creation)
   const discountLine = sess.loyaltyDiscount ? `Loyalty Discount    -₹${sess.loyaltyDiscount}\n` : "";
   const codLine      = paymentMode === "cod" && !isEduOrder ? `COD Charge          ₹30\n` : "";
   const deliveryLine = bill.delivery > 0 ? `Delivery        ₹${bill.delivery}\n` : "";
   const addressLine  = sess.address ? `📍 ${sess.address}\n` : "";
-  const footerLine   = isEduOrder
-    ? `✅ Enrollment confirmed — we'll be in touch!\n`
-    : `🚚 Delivery in 3-5 days\n`;
+  const footerLine   = isEduOrder && paymentMode === "cod"
+    ? `📋 Enrollment received! Pay fees at first class.\n`
+    : isEduOrder
+      ? `✅ Enrollment received — we'll be in touch!\n`
+      : `🚚 Delivery in 3-5 days\n`;
 
   const summaryTitle = isEduOrder ? `🎓 *ENROLLMENT SUMMARY*` : `🧾 *ORDER SUMMARY*`;
 
@@ -1148,27 +1177,67 @@ async function placeOrder(customerId, sess, paymentMode) {
   await send(customerId, summary);
 
   if (paymentMode === "online") {
-    // ── Online payment ─────────────────────────────────────────────────────
-    const payLink = await payment.createLink({
-      amount      : bill.total,
-      customerName: sess.name,
-      mobile      : sess.mobile,
-      description : `Order: ${bill.items.map(i => i.name).join(", ")}`,
-    });
+    const hasUpi  = (bizSettings.upi_id     || "").trim().length > 0;
+    const hasBank = (bizSettings.bank_details || "").trim().length > 0;
 
-    await orders.updatePayLink(order.id, payLink);
-    session.update(customerId, { state: "awaiting_payment", payLink });
+    if (isEduOrder && (hasUpi || hasBank)) {
+      // ── Education/Tourism: show UPI / bank details for manual payment ──────
+      // Status stays "pending_payment" — owner confirms after screenshot is received.
+      let payDetailsBlock = "";
+      if (hasUpi)  payDetailsBlock += `\n📱 *UPI ID:* ${bizSettings.upi_id.trim()}`;
+      if (hasBank) payDetailsBlock += `\n\n🏦 *Bank Transfer:*\n${bizSettings.bank_details.trim()}`;
 
-    const payMsg = {
-      hindi   : `\n💳 *Online payment करें:*\n${payLink.url}\n_(Link 30 मिनट में expire होगा)_\n\nPayment के बाद "paid" reply करें।`,
-      hinglish: `\n💳 *Online payment karo:*\n${payLink.url}\n_(Link 30 min mein expire hoga)_\n\nPayment ke baad "paid" reply karo.`,
-      english : `\n💳 *Pay now:*\n${payLink.url}\n_(Link expires in 30 minutes)_\n\nReply "paid" once done.`,
-    };
-    await send(customerId, payMsg[lang] || payMsg.english);
+      const manualPayMsg = {
+        hindi   : `💳 *Online Payment Details:*${payDetailsBlock}\n\n━━━━━━━━━━━━━━━━━━\n₹${bill.total} transfer karein aur payment screenshot reply karein.\n\nHum screenshot check karke enrollment confirm karenge. ✅`,
+        hinglish: `💳 *Online Payment Details:*${payDetailsBlock}\n\n━━━━━━━━━━━━━━━━━━\n Transfer ₹${bill.total} and reply with payment screenshot.\n\nHum screenshot check karke enrollment confirm karenge. ✅`,
+        english : `💳 *Online Payment Details:*${payDetailsBlock}\n\n━━━━━━━━━━━━━━━━━━\nTransfer ₹${bill.total} and reply with your payment screenshot.\n\nWe'll confirm your enrollment once we verify the payment. ✅`,
+      };
+      await send(customerId, manualPayMsg[lang] || manualPayMsg.english);
+      session.reset(customerId);
+
+    } else {
+      // ── Razorpay online payment link ────────────────────────────────────────
+      const payLink = await payment.createLink({
+        amount      : bill.total,
+        customerName: sess.name,
+        mobile      : sess.mobile,
+        description : `Order: ${bill.items.map(i => i.name).join(", ")}`,
+      });
+
+      await orders.updatePayLink(order.id, payLink);
+      session.update(customerId, { state: "awaiting_payment", payLink });
+
+      const payMsg = {
+        hindi   : `\n💳 *Online payment करें:*\n${payLink.url}\n_(Link 30 मिनट में expire होगा)_\n\nPayment के बाद "paid" reply करें।`,
+        hinglish: `\n💳 *Online payment karo:*\n${payLink.url}\n_(Link 30 min mein expire hoga)_\n\nPayment ke baad "paid" reply karo.`,
+        english : `\n💳 *Pay now:*\n${payLink.url}\n_(Link expires in 30 minutes)_\n\nReply "paid" once done.`,
+      };
+      await send(customerId, payMsg[lang] || payMsg.english);
+    }
 
   } else {
-    // ── COD confirmed ──────────────────────────────────────────────────────
-    await confirmOrder(customerId, order, false);
+    if (isEduOrder) {
+      // ── Education / Tourism: Pay at Venue ──────────────────────────────
+      // Status stays "pending_payment" (Pending Fees) — owner confirms after collecting fee.
+      // Generate enrollment OTP and notify student.
+      const otp = await otpMod.createCodOTP(order.id);
+      const lang2 = sess.lang || "english";
+      const otpMsg = {
+        hindi   : `\n🔐 *Enrollment OTP: ${otp}*\n_(Pehli class mein yeh OTP batana hai)_`,
+        hinglish: `\n🔐 *Enrollment OTP: ${otp}*\n_(Share this OTP at your first class)_`,
+        english : `\n🔐 *Enrollment OTP: ${otp}*\n_(Share this OTP at your first class)_`,
+      };
+      const pendingMsg = {
+        hindi   : `📋 *Enrollment Received!*\nID: *#SL${order.id}*\n💵 Pehli class mein fee jama karein.${otpMsg.hindi}`,
+        hinglish: `📋 *Enrollment Received!*\nID: *#SL${order.id}*\n💵 Pay fees at your first class.${otpMsg.hinglish}`,
+        english : `📋 *Enrollment Received!*\nID: *#SL${order.id}*\n💵 Pay fees at your first class.${otpMsg.english}`,
+      };
+      await send(customerId, pendingMsg[lang2] || pendingMsg.english);
+      session.reset(customerId);
+    } else {
+      // ── Regular COD — confirmed immediately ────────────────────────────
+      await confirmOrder(customerId, order, false);
+    }
   }
 }
 
@@ -1831,7 +1900,8 @@ app.get("/api/loyalty/:id", async (req, res) => {
 
 // GET /api/loyalty/leaderboard — top customers by points
 app.get("/api/loyalty/leaderboard", async (req, res) => {
-  const { customers: allCustomers = [] } = await customers.getAll();
+  const bid = getBid(req);
+  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
   const withLoyalty = await Promise.all(allCustomers.map(async c => {
     const loyaltyRecord = await loyalty.getRecord(c.id);
     return { ...c, loyaltyRecord, tier: loyalty.getTier(loyaltyRecord.totalEarned) };
@@ -1855,6 +1925,7 @@ app.get("/api/festivals/alerts", (req, res) => {
 
 // POST /api/promote/festival — broadcast a festival campaign
 app.post("/api/promote/festival", async (req, res) => {
+  const bid = getBid(req);
   const { festivalName, discount = 10, businessName = "our store" } = req.body;
   if (!festivalName) return res.status(400).json({ error: "festivalName required" });
 
@@ -1865,11 +1936,14 @@ app.post("/api/promote/festival", async (req, res) => {
   const message = festivals.getCampaignMessage(festivalName, businessName, discount);
   if (!message) return res.status(400).json({ error: "Unknown festival" });
 
-  const { customers: allCustomers = [] } = await customers.getAll();
+  const numInfo = await waNumbers.getByBusinessId(bid);
+  const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
+  const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
+  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
   let sent = 0;
   for (const c of allCustomers) {
     try {
-      await wa.send(c.id, message);
+      await wa.send(c.id, message, phoneId, token);
       session.update(c.id, { promoSource: "festival_" + festivalName.toLowerCase().replace(/\s/g, "_"), promoSentAt: Date.now() });
       sent++;
     } catch {}
@@ -1882,6 +1956,7 @@ app.post("/api/promote/festival", async (req, res) => {
 
 // ── Existing promotion APIs ────────────────────────────────────────────────────
 app.post("/api/promote/flash", async (req, res) => {
+  const bid = getBid(req);
   const { message, productIds = [] } = req.body;
   if (!message) return res.status(400).json({ error: "message required" });
 
@@ -1897,16 +1972,20 @@ app.post("/api/promote/flash", async (req, res) => {
     if (lines.length) productBlock = `\n\n🛍️ *Products on Sale:*\n${lines.join("\n")}`;
   }
 
+  const numInfo = await waNumbers.getByBusinessId(bid);
+  const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
+  const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
   const fullMsg = message + productBlock + "\n\nReply with a product name to order! 👇";
-  const { customers: allCustomers = [] } = await customers.getAll();
+  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
   let sent = 0;
   for (const c of allCustomers) {
-    try { await wa.send(c.id, fullMsg); session.update(c.id, { promoSource: "flash_sale", promoSentAt: Date.now() }); sent++; } catch {}
+    try { await wa.send(c.id, fullMsg, phoneId, token); session.update(c.id, { promoSource: "flash_sale", promoSentAt: Date.now() }); sent++; } catch {}
   }
   res.json({ ok: true, sent, total: allCustomers.length });
 });
 
 app.post("/api/promote/newarrival", async (req, res) => {
+  const bid = getBid(req);
   const { productIds = [], message } = req.body;
   if (!productIds.length) return res.status(400).json({ error: "productIds required" });
 
@@ -1922,13 +2001,16 @@ app.post("/api/promote/newarrival", async (req, res) => {
     (p.description    ? `   ${p.description.slice(0, 60)}${p.description.length > 60 ? "…" : ""}\n` : "")
   ).join("\n");
 
+  const numInfo = await waNumbers.getByBusinessId(bid);
+  const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
+  const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
   const header = message || "🆕 *New Arrivals are here!* Check out what's fresh 👇";
   const fullMsg = `${header}\n\n${productLines}\nReply with a product name to order!`;
 
-  const { customers: allCustomers = [] } = await customers.getAll();
+  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
   let sent = 0;
   for (const c of allCustomers) {
-    try { await wa.send(c.id, fullMsg); session.update(c.id, { promoSource: "new_arrival", promoSentAt: Date.now() }); sent++; } catch {}
+    try { await wa.send(c.id, fullMsg, phoneId, token); session.update(c.id, { promoSource: "new_arrival", promoSentAt: Date.now() }); sent++; } catch {}
   }
   res.json({ ok: true, sent });
 });
@@ -1940,10 +2022,13 @@ app.post("/api/promote/abandoned", async (req, res) => {
 
 // POST /api/promote/video — blast a video + caption to all/segment customers
 app.post("/api/promote/video", async (req, res) => {
-  const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
+  const bid = getBid(req);
   const { videoUrl, caption = "", segment = "all" } = req.body;
   if (!videoUrl) return res.status(400).json({ error: "videoUrl required" });
 
+  const numInfo = await waNumbers.getByBusinessId(bid);
+  const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
+  const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
   const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
 
   // Filter by segment
@@ -1959,8 +2044,7 @@ app.post("/api/promote/video", async (req, res) => {
   let sent = 0;
   for (const c of targets) {
     try {
-      const ctx = _waCtx(c.id);
-      await wa.sendVideo(c.id, videoUrl, caption, ctx.phoneId, ctx.token);
+      await wa.sendVideo(c.id, videoUrl, caption, phoneId, token);
       sent++;
     } catch (e) {
       console.warn(`[VideoBlast] Failed to send to ${c.id}:`, e.message);
@@ -1993,10 +2077,13 @@ app.post("/api/promote/upload", async (req, res) => {
 
 // POST /api/promote/image — blast an image to all/segment customers (or students)
 app.post("/api/promote/image", async (req, res) => {
-  const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
+  const bid = getBid(req);
   const { imageUrl, caption = "", segment = "all" } = req.body;
   if (!imageUrl) return res.status(400).json({ error: "imageUrl required" });
 
+  const numInfo = await waNumbers.getByBusinessId(bid);
+  const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
+  const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
   const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
   const targets = allCustomers.filter(c => {
     if (segment === "all")      return true;
@@ -2010,8 +2097,7 @@ app.post("/api/promote/image", async (req, res) => {
   let sent = 0;
   for (const c of targets) {
     try {
-      const ctx = _waCtx(c.id);
-      await wa.sendImage(c.id, imageUrl, caption, ctx.phoneId, ctx.token);
+      await wa.sendImage(c.id, imageUrl, caption, phoneId, token);
       sent++;
     } catch (e) {
       console.warn(`[ImageBlast] Failed ${c.id}:`, e.message);
@@ -2022,10 +2108,13 @@ app.post("/api/promote/image", async (req, res) => {
 
 // POST /api/promote/pdf — blast a PDF/document to all/segment customers (or students)
 app.post("/api/promote/pdf", async (req, res) => {
-  const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
+  const bid = getBid(req);
   const { pdfUrl, caption = "", filename = "Document.pdf", segment = "all" } = req.body;
   if (!pdfUrl) return res.status(400).json({ error: "pdfUrl required" });
 
+  const numInfo = await waNumbers.getByBusinessId(bid);
+  const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
+  const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
   const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
   const targets = allCustomers.filter(c => {
     if (segment === "all")      return true;
@@ -2039,8 +2128,7 @@ app.post("/api/promote/pdf", async (req, res) => {
   let sent = 0;
   for (const c of targets) {
     try {
-      const ctx = _waCtx(c.id);
-      await wa.sendDocument(c.id, pdfUrl, filename, caption, ctx.phoneId, ctx.token);
+      await wa.sendDocument(c.id, pdfUrl, filename, caption, phoneId, token);
       sent++;
     } catch (e) {
       console.warn(`[PdfBlast] Failed ${c.id}:`, e.message);
@@ -2154,10 +2242,14 @@ app.get("/api/tracking/:awb", async (req, res) => {
 // SEGMENT BROADCAST
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/api/promote/segment", async (req, res) => {
+  const bid = getBid(req);
   const { segment = "all", message, productIds = [] } = req.body;
   if (!message) return res.status(400).json({ error: "message required" });
 
-  const { customers: allCustomers = [] } = await customers.getAll();
+  const numInfo = await waNumbers.getByBusinessId(bid);
+  const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
+  const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
+  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
   const now = Date.now();
   const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
   const SIXTY_DAYS  = 60 * 24 * 60 * 60 * 1000;
@@ -2196,7 +2288,7 @@ app.post("/api/promote/segment", async (req, res) => {
   let sent = 0;
   for (const c of targets) {
     try {
-      await wa.send(c.id, fullMsg);
+      await wa.send(c.id, fullMsg, phoneId, token);
       session.update(c.id, { promoSource: "segment_" + segment, promoSentAt: now });
       sent++;
     } catch {}
@@ -2208,23 +2300,33 @@ app.post("/api/promote/segment", async (req, res) => {
 
 // ── Business Settings ─────────────────────────────────────────────────────────
 // In-memory cache so every order doesn't hit the DB
+// TTL: 3 minutes — ensures app-side saves to Supabase are picked up quickly
 const db = require("./db");
 const { supabaseAdmin } = require("./supabase");
-const _settingsCache = {};
+const _settingsCache     = {};   // { bid: settingsObject }
+const _settingsCacheTime = {};   // { bid: timestamp }
+const SETTINGS_TTL       = 3 * 60 * 1000; // 3 minutes
 
 // Reads business settings from Supabase (migrated from Railway PostgreSQL)
 async function getSettings(businessId = DEFAULT_BUSINESS_ID) {
-  if (_settingsCache[businessId]) return _settingsCache[businessId];
+  const now = Date.now();
+  const cached = _settingsCache[businessId];
+  const fresh  = cached && (now - (_settingsCacheTime[businessId] || 0)) < SETTINGS_TTL;
+  if (fresh) return cached;
   try {
-    if (!supabaseAdmin) return {};
+    if (!supabaseAdmin) return cached || {};
     const { data, error } = await supabaseAdmin
       .from("business_settings")
       .select("*")
       .eq("business_id", businessId)
       .maybeSingle();
-    if (data) { _settingsCache[businessId] = data; return data; }
+    if (data) {
+      _settingsCache[businessId]     = data;
+      _settingsCacheTime[businessId] = now;
+      return data;
+    }
   } catch {}
-  return {}; // fallback to billing.js defaults
+  return cached || {}; // fallback: stale cache beats empty
 }
 
 app.get("/api/settings", async (req, res) => {
@@ -2240,6 +2342,7 @@ app.post("/api/settings", async (req, res) => {
     "gst_enabled","gst_rate","delivery_charge","free_above","cod_fee",
     "whatsapp_number","shiprocket_email","shiprocket_password","delhivery_api_key",
     "industry",
+    "upi_id","bank_details",    // online payment details
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {
@@ -2253,12 +2356,21 @@ app.post("/api/settings", async (req, res) => {
       .from("business_settings")
       .upsert(updates, { onConflict: "business_id" });
     if (error) throw new Error(error.message);
-    delete _settingsCache[bid]; // invalidate cache
+    delete _settingsCache[bid];     // invalidate cache immediately
+    delete _settingsCacheTime[bid];
     const s = await getSettings(bid);
     res.json({ ok: true, settings: s });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// DELETE /api/settings/cache — called by app after direct Supabase save to bust server cache
+app.delete("/api/settings/cache", (req, res) => {
+  const bid = getBid(req);
+  delete _settingsCache[bid];
+  delete _settingsCacheTime[bid];
+  res.json({ ok: true });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
