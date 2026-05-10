@@ -458,7 +458,14 @@ async function handleSearch(customerId, sess, message, name) {
     const bizName     = bizSettings.business_name || "our store";
     const industry    = (bizSettings.industry || "").toLowerCase();
 
-    // Industry-aware greeting examples
+    // ── Custom greeting: if set in settings, use it (replace {name} placeholder) ─
+    const customGreeting = (bizSettings.greeting_message || "").trim();
+    if (customGreeting) {
+      const personalised = customGreeting.replace(/\{name\}/gi, name).replace(/\{\{name\}\}/gi, name);
+      return send(customerId, personalised);
+    }
+
+    // Industry-aware greeting examples (fallback when no custom greeting set)
     let exampleHindi    = `"नीली जींस ₹800 में" या "कुर्ती size M"`;
     let exampleHinglish = `"blue jeans under 800" ya "kurti size M"`;
     let exampleEnglish  = `"silk saree" or "floral kurti size M"`;
@@ -489,6 +496,21 @@ async function handleSearch(customerId, sess, message, name) {
   const bizId  = sess.businessId || DEFAULT_BUSINESS_ID;
 
   if (!intent.product) {
+    // ── Location query — reply with stored maps link if available ─────────────
+    const isLocationQuery = /\b(location|address|kahan|kahaan|where|directions?|maps?|gps|kaise aayein|kaise aaye|office|institute|center|centre|branch|adress|addres)\b/i.test(message);
+    if (isLocationQuery) {
+      const locSettings = await getSettings(bizId);
+      const locUrl      = (locSettings.location_url || "").trim();
+      if (locUrl) {
+        const locMsg = {
+          hindi   : `📍 *हमारा पता / Location:*\n\n${locUrl}`,
+          hinglish: `📍 *Hamare yahan aane ke liye:*\n\n${locUrl}`,
+          english : `📍 *Our Location:*\n\n${locUrl}`,
+        };
+        return send(customerId, locMsg[lang] || locMsg.english);
+      }
+    }
+
     // Not a product search — customer asked something else (delivery, timings, etc.)
     // Tell customer their query is forwarded, then notify the owner.
     const forwardMsg = {
@@ -2369,7 +2391,8 @@ app.post("/api/settings", async (req, res) => {
     "gst_enabled","gst_rate","delivery_charge","free_above","cod_fee",
     "whatsapp_number","shiprocket_email","shiprocket_password","delhivery_api_key",
     "industry",
-    "upi_id","bank_details",    // online payment details
+    "upi_id","bank_details",          // online payment details
+    "greeting_message","location_url", // bot customisation
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {

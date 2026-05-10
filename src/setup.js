@@ -167,6 +167,10 @@ async function setup() {
       shiprocket_password  TEXT NOT NULL DEFAULT '',
       delhivery_api_key    TEXT NOT NULL DEFAULT '',
       industry             TEXT NOT NULL DEFAULT 'product',
+      upi_id               TEXT NOT NULL DEFAULT '',
+      bank_details         TEXT NOT NULL DEFAULT '',
+      greeting_message     TEXT NOT NULL DEFAULT '',
+      location_url         TEXT NOT NULL DEFAULT '',
       updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
