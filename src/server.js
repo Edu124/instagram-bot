@@ -188,6 +188,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
                 };
                 await send(senderId, fwdMsg[imgLang] || fwdMsg.english);
                 await notifyOwner(routedBusinessId, senderId, name, "[Image shared by student]", "query");
+                await photoInquiry.create(senderId, imageUrl, name);
               } else {
                 await handlePhotoSearch(senderId, sess, imageUrl, name);
               }
