@@ -188,7 +188,10 @@ app.post("/webhook/whatsapp", async (req, res) => {
                 };
                 await send(senderId, fwdMsg[imgLang] || fwdMsg.english);
                 await notifyOwner(routedBusinessId, senderId, name, "[Image shared by student]", "query");
-                await photoInquiry.create(senderId, imageUrl, name);
+                // Build proxy URL so the app can display the image (media ID alone is not a valid URL)
+                const _serverBase = process.env.SERVER_URL || "https://instagram-bot-production-ef01.up.railway.app";
+                const _proxyUrl   = `${_serverBase}/api/media/${imageUrl}?bid=${routedBusinessId}`;
+                await photoInquiry.create(senderId, _proxyUrl, name);
               } else {
                 await handlePhotoSearch(senderId, sess, imageUrl, name);
               }
@@ -2185,6 +2188,29 @@ app.post("/api/orders/:id/verify-otp", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ── Media Proxy — resolves WhatsApp media ID and streams image to app ────────
+// App uses: GET /api/media/:mediaId?bid=xxx
+// No auth header needed — server uses business credentials internally
+app.get("/api/media/:mediaId", async (req, res) => {
+  try {
+    const bid     = getBid(req);
+    const { mediaId } = req.params;
+    const numInfo = await waNumbers.getByBusinessId(bid);
+    const token   = numInfo?.token || DEFAULT_WA_TOKEN;
+
+    const metaUrl = await wa.resolveMediaUrl(mediaId, token);
+    if (!metaUrl) return res.status(404).json({ error: "Media not found" });
+
+    const { buffer, contentType } = await wa.downloadMedia(metaUrl, token);
+    res.set("Content-Type", contentType);
+    res.set("Cache-Control", "public, max-age=86400"); // cache 1 day
+    res.send(buffer);
+  } catch (e) {
+    console.error("[MediaProxy] Error:", e.message);
+    res.status(500).json({ error: "Failed to fetch media" });
+  }
+});
+
 // PHOTO INQUIRY APIs
 // ─────────────────────────────────────────────────────────────────────────────
 app.get("/api/inquiries", async (req, res) => {

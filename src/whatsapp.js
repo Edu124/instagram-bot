@@ -161,4 +161,51 @@ async function sendDocument(to, docUrl, filename = "Document.pdf", caption = "",
 
 function sanitize(text) { return text.slice(0, 4096); }
 
-module.exports = { send, sendProductCards, sendQuickReplies, sendInvoice, markReadAndType, sendVideo, sendImage, sendDocument };
+// ── Resolve WhatsApp media ID → Meta's temp download URL ─────────────────────
+function resolveMediaUrl(mediaId, token = WA_TOKEN) {
+  return new Promise((resolve) => {
+    const options = {
+      hostname: "graph.facebook.com",
+      path    : `/v21.0/${mediaId}`,
+      method  : "GET",
+      headers : { "Authorization": `Bearer ${token}` },
+    };
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => {
+        try { resolve(JSON.parse(data).url || null); }
+        catch { resolve(null); }
+      });
+    });
+    req.on("error", () => resolve(null));
+    req.end();
+  });
+}
+
+// ── Download media bytes from Meta's authenticated URL ────────────────────────
+function downloadMedia(url, token = WA_TOKEN) {
+  return new Promise((resolve, reject) => {
+    try {
+      const parsed  = new URL(url);
+      const options = {
+        hostname: parsed.hostname,
+        path    : parsed.pathname + parsed.search,
+        method  : "GET",
+        headers : { "Authorization": `Bearer ${token}` },
+      };
+      const req = https.request(options, (res) => {
+        const chunks = [];
+        res.on("data", chunk => chunks.push(chunk));
+        res.on("end", () => resolve({
+          buffer     : Buffer.concat(chunks),
+          contentType: res.headers["content-type"] || "image/jpeg",
+        }));
+      });
+      req.on("error", reject);
+      req.end();
+    } catch (e) { reject(e); }
+  });
+}
+
+module.exports = { send, sendProductCards, sendQuickReplies, sendInvoice, markReadAndType, sendVideo, sendImage, sendDocument, resolveMediaUrl, downloadMedia };
