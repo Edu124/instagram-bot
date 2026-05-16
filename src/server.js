@@ -80,7 +80,7 @@ async function groqAnswer(question, industry = "", businessName = "", faqContext
       ` Reply clearly and concisely in the same language the customer used (Hindi/English/Hinglish).` +
       ` Keep the reply under 300 words. ${redirectHint}`;
     const body = JSON.stringify({
-      model   : "llama3-8b-8192",
+      model   : "llama-3.1-8b-instant",
       messages: [
         { role: "system",    content: systemPrompt },
         { role: "user",      content: question },
