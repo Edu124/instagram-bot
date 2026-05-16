@@ -103,8 +103,11 @@ async function groqAnswer(question, industry = "", businessName = "", faqContext
       res.on("end", () => {
         try {
           const parsed = JSON.parse(data);
-          resolve(parsed.choices?.[0]?.message?.content?.trim() || null);
-        } catch { resolve(null); }
+          if (parsed.error) console.error("[Groq] API error:", JSON.stringify(parsed.error));
+          const answer = parsed.choices?.[0]?.message?.content?.trim() || null;
+          if (!answer) console.log("[Groq] Raw response:", data.slice(0, 300));
+          resolve(answer);
+        } catch (e) { console.error("[Groq] Parse error:", e.message, data.slice(0,200)); resolve(null); }
       });
     });
     req.on("error", () => resolve(null));
