@@ -191,8 +191,10 @@ function generateHTML({ bizName, industry, cfg, products, q, max, min, color, ca
     const chips    = cfg.chipFields(p);
     const priceStr = cfg.priceLabel(p);
     const imgUrl   = p.imageUrl || p.image_url || "";
+    // Include SELLY_CART: so the bot directly adds to cart instead of treating as a search
+    const singleWaMsg = cfg.singleMsg(p.name) + "\n\nSELLY_CART:" + p.name;
     const singleWa = waNum
-      ? `https://wa.me/${waNum}?text=${encodeURIComponent(cfg.singleMsg(p.name))}`
+      ? `https://wa.me/${waNum}?text=${encodeURIComponent(singleWaMsg)}`
       : "#";
 
     const chipsHTML = chips.length
@@ -216,10 +218,9 @@ function generateHTML({ bizName, industry, cfg, products, q, max, min, color, ca
         </div>
         ${chipsHTML}
         ${p.description ? `<div class="card-desc">${escapeHTML(p.description.slice(0, 70))}${p.description.length > 70 ? "…" : ""}</div>` : ""}
-        <a class="quick-order-btn" href="${singleWa}" target="_blank">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.124.558 4.117 1.534 5.843L0 24l6.335-1.512A11.945 11.945 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.818a9.818 9.818 0 01-5.015-1.376l-.36-.214-3.727.979.994-3.638-.235-.374A9.818 9.818 0 1112 21.818z"/></svg>
-          Order this
-        </a>
+        <button class="quick-order-btn" id="addbtn-${idx}" onclick="addToCartAndOrder(${idx}, event)">
+          🛒 Add to Cart
+        </button>
       </div>
     </div>`;
   }).join("");
@@ -316,7 +317,7 @@ function generateHTML({ bizName, industry, cfg, products, q, max, min, color, ca
   .heart-btn:active { transform: scale(1.3); }
 
   /* ── Quick order button (single item) ──────────────────────── */
-  .quick-order-btn { display: flex; align-items: center; justify-content: center; gap: 5px; background: var(--green); color: #fff; font-size: 11px; font-weight: 800; padding: 8px; border-radius: 9px; text-decoration: none; margin-top: auto; }
+  .quick-order-btn { display: flex; align-items: center; justify-content: center; gap: 5px; background: var(--green); color: #fff; font-size: 11px; font-weight: 800; padding: 8px; border-radius: 9px; text-decoration: none; margin-top: auto; border: none; cursor: pointer; width: 100%; transition: background .2s; }
   .quick-order-btn:active { opacity: 0.85; }
 
   /* ── Floating cart bar ──────────────────────────────────────── */
@@ -451,11 +452,29 @@ function updateFloatBar() {
   total.textContent = totalAmt > 0 ? "₹" + totalAmt.toLocaleString("en-IN") : "";
 }
 
+// Add single item to local cart (select it) and update button label
+function addToCartAndOrder(idx, evt) {
+  evt.stopPropagation();
+  const btn = document.getElementById("addbtn-" + idx);
+  if (selected.has(idx)) {
+    // Already in cart — remove it
+    selected.delete(idx);
+    document.getElementById("card-" + idx).classList.remove("selected");
+    if (btn) { btn.textContent = "🛒 Add to Cart"; btn.style.background = "var(--green)"; }
+  } else {
+    // Add to cart
+    selected.add(idx);
+    document.getElementById("card-" + idx).classList.add("selected");
+    if (btn) { btn.textContent = "✓ In Cart"; btn.style.background = "var(--accent)"; }
+  }
+  updateFloatBar();
+}
+
 function orderSelected() {
   if (!selected.size || !WA_NUM) return;
-  const items   = [...selected].map(i => PRODUCTS[i]).filter(Boolean);
+  const items    = [...selected].map(i => PRODUCTS[i]).filter(Boolean);
   const nameList = items.map((p, i) => (i + 1) + ". " + p.name + (p.price ? " (₹" + p.price.toLocaleString("en-IN") + ")" : "")).join("\\n");
-  // SELLY_CART: prefix lets the bot detect and bulk-add to cart
+  // SELLY_CART: prefix lets the bot detect and bulk-add to cart without searching
   const msgBody  = "SELLY_CART:" + items.map(p => p.name).join("|");
   const fullMsg  = ORDER_MSG.replace("__NAMES__", nameList) + "\\n\\n" + msgBody;
   window.open("https://wa.me/" + WA_NUM + "?text=" + encodeURIComponent(fullMsg), "_blank");

@@ -417,6 +417,50 @@ async function routeMessage(customerId, sess, message, name) {
   // ── Shop page cart: customer sent SELLY_CART: from the shop link ──────────
   if (message.includes("SELLY_CART:")) return handleSellyCart(customerId, sess, message, name);
 
+  // ── In-bot cart commands: "add X to cart", "my cart", "place order" ─────────
+  // Works for all industries (especially kirana which has no shop page)
+  const addCartMatch = message.match(/^(?:add\s+)?(.+?)\s+(?:to cart|add cart|meri cart mein|cart mein daalo|cart add)$/i)
+                    || message.match(/^(?:add to cart|cart)\s*[:\-]?\s*(.+)$/i);
+  if (addCartMatch) {
+    const itemName  = addCartMatch[1].trim();
+    const fakeMsg   = "SELLY_CART:" + itemName;
+    return handleSellyCart(customerId, sess, fakeMsg, name);
+  }
+  const isViewCart = /^(my cart|view cart|cart|show cart|mera cart|cart dikhao|kya hai cart mein)$/i.test(message.trim());
+  if (isViewCart) {
+    const lang = sess.lang || "english";
+    const cart = sess.cart || [];
+    if (!cart.length) {
+      const empty = { hindi: "🛒 Aapka cart khali hai.", hinglish: "🛒 Your cart is empty.", english: "🛒 Your cart is empty." };
+      return send(customerId, empty[lang] || empty.english);
+    }
+    const lines  = cart.map((item, i) => `${i + 1}. *${item.name}* — ₹${item.price}`).join("\n");
+    const total  = cart.reduce((s, i) => s + i.price, 0);
+    const header = { hindi: `🛒 *Aapka Cart:*\n\n`, hinglish: `🛒 *Your Cart:*\n\n`, english: `🛒 *Your Cart:*\n\n` };
+    const footer = { hindi: `\n\nTotal: ₹${total}\n\n"place order" type karo checkout ke liye`, hinglish: `\n\nTotal: ₹${total}\n\nType "place order" to checkout`, english: `\n\nTotal: ₹${total}\n\nType "place order" to checkout` };
+    return send(customerId, (header[lang] || header.english) + lines + (footer[lang] || footer.english));
+  }
+  const isPlaceOrder = /^(place order|order karo|checkout|done|order)$/i.test(message.trim());
+  if (isPlaceOrder && (sess.cart || []).length) {
+    // Trigger the normal checkout flow — set state to collecting_address or collecting_mobile
+    const lang = sess.lang || "english";
+    const poSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+    const poIndustry = (poSettings.industry || "").toLowerCase();
+    const skipAddress = poIndustry.includes("education") || poIndustry.includes("tourism");
+    session.update(customerId, { state: skipAddress ? "collecting_mobile" : "collecting_address" });
+    const addrMsg = {
+      hindi   : "📦 *Delivery address kya hai?*\n\nApna poora address likhiye (ghar no., street, city, pincode).",
+      hinglish: "📦 *Delivery address kya hai?*\n\nApna poora address likhiye.",
+      english : "📦 *What is your delivery address?*\n\nPlease type your full address (house no., street, city, pincode).",
+    };
+    const mobileMsg = {
+      hindi   : "📱 *Aapka mobile number kya hai?*",
+      hinglish: "📱 *Aapka mobile number?*",
+      english : "📱 *What is your mobile number?*",
+    };
+    return send(customerId, skipAddress ? (mobileMsg[lang] || mobileMsg.english) : (addrMsg[lang] || addrMsg.english));
+  }
+
   // ── Global commands (any state) ───────────────────────────────────────────
   // ── Star rating reply ─────────────────────────────────────────────────────────
   if (/^[135]$/.test(message.trim()) && sess.awaitingReview) {
