@@ -2301,6 +2301,36 @@ app.get ("/api/customers/:id",   async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Get distinct batches for this business (education class grouping) ──────────
+app.get("/api/batches", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    const { rows } = await db.query(
+      `SELECT DISTINCT batch FROM bot_customers
+       WHERE business_id=$1 AND batch != '' ORDER BY batch ASC`,
+      [bid]
+    );
+    res.json({ batches: rows.map(r => r.batch) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Assign/update a student's batch ──────────────────────────────────────────
+app.patch("/api/customers/:id/batch", async (req, res) => {
+  const bid   = getBid(req);
+  const { batch = "" } = req.body;
+  try {
+    await db.query(
+      `UPDATE bot_customers SET batch=$1 WHERE id=$2 AND business_id=$3`,
+      [batch.trim(), req.params.id, bid]
+    );
+    // Also sync to Supabase so the app's direct queries see it
+    if (supabaseAdmin) {
+      await supabaseAdmin.from("bot_customers").update({ batch: batch.trim() }).eq("id", req.params.id);
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // (duplicate GET /api/orders removed — the handler at line ~1582 handles this)
 
 // ── Send custom WhatsApp message to a customer (owner → student/customer) ─────
@@ -3149,14 +3179,14 @@ app.get("/api/schedule", async (req, res) => {
 
 app.post("/api/schedule", async (req, res) => {
   const bid = getBid(req);
-  const { title, course_name, course_id, notify_mode, scheduled_at } = req.body;
+  const { title, course_name, course_id, notify_mode, batch_name, scheduled_at } = req.body;
   if (!title || !scheduled_at) return res.status(400).json({ error: "title and scheduled_at required" });
   try {
     const id = Date.now().toString() + Math.random().toString(36).slice(2, 6);
     await db.query(
-      `INSERT INTO class_schedules (id, business_id, title, course_name, course_id, notify_mode, scheduled_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [id, bid, title, course_name || "", course_id || null, notify_mode || "all", new Date(scheduled_at).toISOString()]
+      `INSERT INTO class_schedules (id, business_id, title, course_name, course_id, notify_mode, batch_name, scheduled_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [id, bid, title, course_name || "", course_id || null, notify_mode || "all", batch_name || "", new Date(scheduled_at).toISOString()]
     );
     res.json({ ok: true, id });
   } catch (e) {
@@ -3336,7 +3366,7 @@ async function checkClassReminders() {
       const phoneId   = sched.phone_number_id || DEFAULT_PHONE_ID;
       const token     = sched.token           || DEFAULT_WA_TOKEN;
 
-      // Get enrolled students — filter by course if notify_mode = 'course'
+      // Get students to notify — filtered by notify_mode
       let customers;
       if (sched.notify_mode === "course" && sched.course_id) {
         // Only students who ordered this specific course (cart contains product with matching id)
@@ -3350,8 +3380,16 @@ async function checkClassReminders() {
           [sched.business_id, JSON.stringify([{ id: sched.course_id }])]
         );
         customers = rows;
+      } else if (sched.notify_mode === "batch" && sched.batch_name) {
+        // Only students assigned to this batch/class
+        const { rows } = await db.query(
+          `SELECT id, name FROM bot_customers
+           WHERE business_id=$1 AND batch=$2 LIMIT 500`,
+          [sched.business_id, sched.batch_name]
+        );
+        customers = rows;
       } else {
-        // All enrolled students
+        // All enrolled students (confirmed or delivered orders)
         const { rows } = await db.query(
           `SELECT id, name FROM bot_customers
            WHERE id IN (

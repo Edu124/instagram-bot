@@ -78,6 +78,9 @@ async function setup() {
     )
   `);
   await db.query(`CREATE INDEX IF NOT EXISTS customers_ref_idx ON bot_customers(referral_code)`);
+  // Add batch column for education class grouping (migration for existing tables)
+  await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS batch TEXT NOT NULL DEFAULT ''`);
+  await db.query(`CREATE INDEX IF NOT EXISTS customers_batch_idx ON bot_customers(business_id, batch)`);
 
   // ── loyalty_points ────────────────────────────────────────────────────────────
   await db.query(`
@@ -254,6 +257,7 @@ async function setup() {
   // Migrate existing tables — add columns added after initial deploy
   await db.query(`ALTER TABLE class_schedules ADD COLUMN IF NOT EXISTS course_id   TEXT`);
   await db.query(`ALTER TABLE class_schedules ADD COLUMN IF NOT EXISTS notify_mode TEXT NOT NULL DEFAULT 'all'`);
+  await db.query(`ALTER TABLE class_schedules ADD COLUMN IF NOT EXISTS batch_name  TEXT NOT NULL DEFAULT ''`);
   await db.query(`CREATE INDEX IF NOT EXISTS schedules_bid_idx ON class_schedules(business_id)`);
   await db.query(`CREATE INDEX IF NOT EXISTS schedules_time_idx ON class_schedules(scheduled_at)`);
 
