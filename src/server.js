@@ -41,58 +41,62 @@ const waNumbers    = require("./wa_numbers");  // multi-tenant phone routing
 // ── Groq AI — doubt solving for education (free tier, Llama 3) ────────────────
 // Uses HTTPS directly so no npm package needed. Set GROQ_API_KEY in Railway env.
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
-// Build Groq system prompt (shared by text + vision)
-function _groqSystemPrompt(industry, businessName, faqContext, lang) {
-  const ind = (industry || "").toLowerCase();
-  let roleDesc, helpScope, redirectHint;
-  if (ind.includes("education")) {
-    roleDesc     = `a helpful teaching assistant for ${businessName || "a coaching institute"}`;
-    helpScope    = "Answer academic doubts, explain concepts, solve problems, and help students understand topics. If a student sends a photo of a question or problem, read it carefully and answer it.";
-    redirectHint = "If the question is not academic or course-related, politely ask them to contact the teacher directly.";
-  } else if (ind.includes("cloth") || ind.includes("fashion") || ind.includes("apparel")) {
-    roleDesc     = `a knowledgeable shopping assistant for ${businessName || "a clothing store"}`;
-    helpScope    = "Help with fabric/material info, sizing guidance, outfit suggestions, care instructions, and fashion advice.";
-    redirectHint = "If you cannot answer (e.g. stock availability, specific prices), ask them to contact the store directly.";
-  } else if (ind.includes("kirana") || ind.includes("grocery") || ind.includes("supermart")) {
-    roleDesc     = `a helpful store assistant for ${businessName || "a grocery store"}`;
-    helpScope    = "Help with product info, ingredient questions, storage tips, recipe ideas, and general grocery queries.";
-    redirectHint = "If you cannot answer (e.g. exact availability or pricing), ask them to contact the store directly.";
-  } else if (ind.includes("tourism") || ind.includes("travel") || ind.includes("tour")) {
-    roleDesc     = `a knowledgeable travel assistant for ${businessName || "a travel agency"}`;
-    helpScope    = "Help with destination info, travel tips, visa questions, packing advice, and general itinerary guidance.";
-    redirectHint = "If you cannot answer (e.g. specific package prices or availability), ask them to contact the agency directly.";
-  } else if (ind.includes("restaurant") || ind.includes("cafe") || ind.includes("hotel")) {
-    roleDesc     = `a helpful assistant for ${businessName || "a restaurant"}`;
-    helpScope    = "Help with menu questions, ingredient/allergen info, cuisine explanations, and dining suggestions.";
-    redirectHint = "If you cannot answer (e.g. table availability or specific pricing), ask them to contact the restaurant directly.";
-  } else {
-    roleDesc     = `a helpful customer service assistant for ${businessName || "a business"}`;
-    helpScope    = "Answer general customer queries, provide helpful information, and assist with common questions.";
-    redirectHint = "If you cannot confidently answer, politely ask them to contact the business directly.";
-  }
-  const faqSection = faqContext
-    ? `\n\nHere are some FAQs about this business — use them to answer if relevant:\n${faqContext}`
-    : "";
-  // Explicit language instruction — use detected session language, not guess
+// Build Groq system prompt — two modes:
+//  • faqOnly  (non-education): ONLY answer from owner's FAQ, no extra knowledge
+//  • doubt    (education):     Teaching assistant with full subject knowledge
+function _groqSystemPrompt(industry, businessName, faqContext, lang, faqOnly = false) {
   const langMap  = { hindi: "Hindi", hinglish: "Hinglish (mix of Hindi and English)", english: "English" };
-  const langNote = `You MUST reply in ${langMap[lang] || "English"} only. Do not switch languages.`;
-  return `You are ${roleDesc}. ${helpScope}${faqSection} ${langNote} Keep the reply under 300 words. ${redirectHint}`;
+  const langNote = `Reply in ${langMap[lang] || "English"} only.`;
+  const ind      = (industry || "").toLowerCase();
+
+  if (faqOnly) {
+    // ── FAQ-only mode: strict, short, no extra content ────────────────────────
+    return [
+      `You are a customer service bot for ${businessName || "a business"}.`,
+      `The business owner has provided the following FAQ answers:`,
+      `\n${faqContext}\n`,
+      `RULES:`,
+      `1. Answer ONLY using the FAQ above. Do NOT add any extra information or general knowledge.`,
+      `2. Keep your reply to 1-2 short sentences maximum.`,
+      `3. If the question is not covered in the FAQ, reply ONLY with: "I don't have that info. Please contact us directly 🙏"`,
+      `4. ${langNote}`,
+      `5. Do NOT repeat the question back. Give only the answer.`,
+    ].join(" ");
+  }
+
+  // ── Education / doubt mode: full teaching assistant ───────────────────────
+  const isEdu = ind.includes("education");
+  const role  = isEdu
+    ? `a helpful teaching assistant for ${businessName || "a coaching institute"}. Answer academic doubts clearly, solve problems step by step, and explain concepts simply.`
+    : `a helpful assistant for ${businessName || "a business"}.`;
+
+  const faqSection = faqContext
+    ? `\n\nBusiness FAQs (use if relevant):\n${faqContext}`
+    : "";
+
+  return [
+    `You are ${role}${faqSection}`,
+    `${langNote}`,
+    `Keep reply under 200 words. Be direct and clear. No unnecessary preamble.`,
+    isEdu ? `If not an academic question, say: "Please contact the teacher directly."` : "",
+  ].filter(Boolean).join(" ");
 }
 
 // ── Groq text answer ──────────────────────────────────────────────────────────
-async function groqAnswer(question, industry = "", businessName = "", faqContext = "", lang = "english") {
+// faqOnly=true → strict FAQ mode (max 120 tokens), false → doubt/teaching mode (max 350 tokens)
+async function groqAnswer(question, industry = "", businessName = "", faqContext = "", lang = "english", faqOnly = false) {
   if (!GROQ_API_KEY) return null;
   const https = require("https");
   return new Promise((resolve) => {
-    const systemPrompt = _groqSystemPrompt(industry, businessName, faqContext, lang);
+    const systemPrompt = _groqSystemPrompt(industry, businessName, faqContext, lang, faqOnly);
     const body = JSON.stringify({
       model      : "llama-3.1-8b-instant",
       messages   : [
         { role: "system", content: systemPrompt },
         { role: "user",   content: question },
       ],
-      max_tokens : 512,
-      temperature: 0.4,
+      max_tokens : faqOnly ? 120 : 350,   // FAQ: short answer only; doubt: allow explanation
+      temperature: faqOnly ? 0.1 : 0.4,  // FAQ: very deterministic; doubt: slight creativity
     });
     const req = https.request({
       hostname: "api.groq.com",
@@ -877,12 +881,19 @@ async function handleSearch(customerId, sess, message, name) {
     // Any message with a question mark
     || /\?/.test(message);
 
-  console.log(`[Groq Check] industry="${qIndustry0}" isDoubt=${isDoubtMsg} hasFAQ=${!!qFaq0} hasKey=${!!GROQ_API_KEY} msg="${message.slice(0,60)}"`);
+  const isEducation = qIndustry0.includes("education");
+  // For non-education: only call Groq if owner has set FAQ text (saves tokens)
+  // For education: always call Groq for doubts/questions
+  const shouldCallGroq = isDoubtMsg && GROQ_API_KEY && (isEducation || qFaq0.length > 0);
+  // faqOnly mode: non-education industries that have FAQ text → strict FAQ-only answer
+  const faqOnlyMode = !isEducation && qFaq0.length > 0;
 
-  if (isDoubtMsg && GROQ_API_KEY) {
+  console.log(`[Groq Check] industry="${qIndustry0}" isDoubt=${isDoubtMsg} hasFAQ=${!!qFaq0} faqOnly=${faqOnlyMode} call=${shouldCallGroq} msg="${message.slice(0,60)}"`);
+
+  if (shouldCallGroq) {
     try {
-      console.log(`[Groq] Attempting answer for: "${message.slice(0,80)}"`);
-      const aiAnswer = await groqAnswer(message, qIndustry0, qSettings0.business_name || "", qFaq0, lang);
+      console.log(`[Groq] Attempting (faqOnly=${faqOnlyMode}): "${message.slice(0,80)}"`);
+      const aiAnswer = await groqAnswer(message, qIndustry0, qSettings0.business_name || "", qFaq0, lang, faqOnlyMode);
       if (aiAnswer) {
         console.log(`[Groq] Got answer (${aiAnswer.length} chars)`);
         const aiPrefix = { hindi: "🤖 *AI Assistant:*\n\n", hinglish: "🤖 *AI Assistant:*\n\n", english: "🤖 *AI Assistant:*\n\n" };
@@ -900,11 +911,15 @@ async function handleSearch(customerId, sess, message, name) {
   if (!intent.product) {
 
     // Try Groq AI to answer customer queries before forwarding to owner
-    const qSettings = await getSettings(bizId);
-    const qIndustry = qSettings.industry || "";
-    if (GROQ_API_KEY) {
+    const qSettings  = await getSettings(bizId);
+    const qIndustry  = (qSettings.industry || "").toLowerCase();
+    const qFaqText   = (qSettings.faq_text || "").trim();
+    const isEduFall  = qIndustry.includes("education");
+    const faqOnlyFall = !isEduFall && qFaqText.length > 0;
+    // Skip Groq if non-education and no FAQ set — just forward to owner
+    if (GROQ_API_KEY && (isEduFall || qFaqText.length > 0)) {
       try {
-        const aiAnswer = await groqAnswer(message, qIndustry, qSettings.business_name || "", qSettings.faq_text || "", lang);
+        const aiAnswer = await groqAnswer(message, qIndustry, qSettings.business_name || "", qFaqText, lang, faqOnlyFall);
         if (aiAnswer) {
           const aiPrefix = {
             hindi   : "🤖 *AI Assistant:*\n\n",
