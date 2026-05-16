@@ -178,7 +178,17 @@ app.post("/webhook/whatsapp", async (req, res) => {
             if (imageUrl) {
               const imgSettings = await getSettings(routedBusinessId);
               const imgIndustry = (imgSettings.industry || "").toLowerCase();
-              if (imgIndustry.includes("education") || imgIndustry.includes("tourism")) {
+              if (imgIndustry === "kirana") {
+                // Kirana: customer sent a photo of their grocery list
+                const imgLang = sess.lang || "english";
+                session.update(senderId, { kiranaImageId: imageUrl, state: "kirana_collecting_name" });
+                const listMsg = {
+                  hindi   : `📸 List ki photo mil gayi! ✅\n\nAb apna *naam* batayein:`,
+                  hinglish: `📸 List photo mil gayi! ✅\n\nApna *naam* batao:`,
+                  english : `📸 Got your list photo! ✅\n\nPlease share your *name*:`,
+                };
+                await send(senderId, listMsg[imgLang] || listMsg.english);
+              } else if (imgIndustry.includes("education") || imgIndustry.includes("tourism")) {
                 // Forward image query to business owner
                 const imgLang = sess.lang || "english";
                 const fwdMsg = {
@@ -461,17 +471,24 @@ async function handleKiranaFlow(customerId, sess, message, name) {
     const bizSettings  = await getSettings(bizId);
     const ownerNum     = (bizSettings.whatsapp_number || "").replace(/[^0-9]/g, "");
     if (ownerNum) {
-      const listFormatted = cart.map(i => `• ${i.name}`).join("\n");
-      const custLink      = `https://wa.me/${customerId.replace(/[^0-9]/g, "")}`;
-      const notify =
+      const ctx      = _waCtx(customerId);
+      const custLink = `https://wa.me/${customerId.replace(/[^0-9]/g, "")}`;
+      const header   =
         `🛒 *New Grocery Order!*\n\n` +
         `👤 *Name:* ${kiranaName}\n` +
         `📱 *Mobile:* ${kiranaMobile}\n` +
         `📍 *Address:* ${address}\n\n` +
-        `📋 *Items:*\n${listFormatted}\n\n` +
         `💬 Reply to customer: ${custLink}`;
-      const ctx = _waCtx(customerId);
-      await wa.send(ownerNum, notify, ctx.phoneId, ctx.token);
+
+      if (sess.kiranaImageId) {
+        // Customer sent a photo of the list — forward the image to owner
+        const caption = `🛒 Order from ${kiranaName} | ${kiranaMobile}\n📍 ${address}\n\n💬 ${custLink}`;
+        await wa.sendImage(ownerNum, sess.kiranaImageId, caption, ctx.phoneId, ctx.token);
+      } else {
+        // Customer typed the list — send formatted text
+        const listFormatted = cart.map(i => `• ${i.name}`).join("\n");
+        await wa.send(ownerNum, `${header}\n\n📋 *Items:*\n${listFormatted}`, ctx.phoneId, ctx.token);
+      }
     }
 
     session.reset(customerId);

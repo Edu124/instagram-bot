@@ -130,16 +130,20 @@ async function sendVideo(to, videoUrl, caption = "", phoneId = PHONE_ID, token =
 }
 
 // ── Send an image message ─────────────────────────────────────────────────────
+// Accepts either a public URL (link) or a WhatsApp media ID (numeric string)
 async function sendImage(to, imageUrl, caption = "", phoneId = PHONE_ID, token = WA_TOKEN) {
   if (!token || !phoneId) {
     console.log(`[WhatsApp MOCK] → ${to}: [IMAGE] ${imageUrl} — "${caption.slice(0, 60)}"`);
     return;
   }
+  const isMediaId = /^\d+$/.test(String(imageUrl).trim());
   const body = JSON.stringify({
     messaging_product: "whatsapp",
     to,
-    type: "image",
-    image: { link: imageUrl, caption: sanitize(caption) },
+    type : "image",
+    image: isMediaId
+      ? { id: imageUrl, caption: sanitize(caption) }
+      : { link: imageUrl, caption: sanitize(caption) },
   });
   return apiPost(`/${phoneId}/messages`, body, token);
 }
