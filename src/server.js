@@ -861,37 +861,41 @@ async function handleSearch(customerId, sess, message, name) {
     }
   }
 
-  const intent = await ai.extractSearchIntent(message);
-
-  // ── Detect doubt/question patterns BEFORE product search ──────────────────────
-  // If the message looks like a question or doubt, try Groq first for ALL industries.
+  // ── Groq FAQ/doubt check — runs BEFORE intent extraction ─────────────────────
+  // Catches: academic doubts, FAQ questions, policy/delivery/timing queries etc.
   const qSettings0 = await getSettings(bizId);
   const qIndustry0 = (qSettings0.industry || "").toLowerCase();
-  const isDoubtMsg = /^(explain|what is|what are|how does|how do|why is|why are|define|solve|calculate|difference between|tell me about|describe|meaning of|full form|formula|examples? of|give me an example|can you explain|help me understand|iska matlab|matlab|samjhao|samjhaao|batao|kya hai|kaise|kyun)/i.test(message.trim())
-                  || /\?/.test(message); // any message ending with ?
+  const qFaq0      = (qSettings0.faq_text  || "").trim();
 
-  console.log(`[Groq Check] industry="${qIndustry0}" isDoubt=${isDoubtMsg} hasKey=${!!GROQ_API_KEY} msg="${message.slice(0,60)}"`);
+  const isDoubtMsg =
+    // Question words at start
+    /^(explain|what|how|why|when|where|who|which|define|solve|calculate|describe|tell me|difference between|meaning of|full form|formula|example of|give me|can you|help me|is there|are there|do you|does|did|will you|would|should|could|shall)/i.test(message.trim())
+    // Hindi/Hinglish question starters
+    || /^(kya|kab|kaise|kahan|kaun|kyun|bata|samjha|matlab|iska|aap|kya aap|kya hai|kya hoga|kya milega|kya hota)/i.test(message.trim())
+    // Business FAQ keywords — delivery, timing, payment, return, policy etc.
+    || /\b(deliver|delivery|shipping|ship|return|refund|cancel|policy|timing|timings|time|hours|open|close|payment|pay|emi|installment|accept|available|charge|fee|fees|discount|offer|warranty|guarantee|replace|exchange|cod|cash on delivery|online payment|upi|card|wallet)\b/i.test(message)
+    // Any message with a question mark
+    || /\?/.test(message);
+
+  console.log(`[Groq Check] industry="${qIndustry0}" isDoubt=${isDoubtMsg} hasFAQ=${!!qFaq0} hasKey=${!!GROQ_API_KEY} msg="${message.slice(0,60)}"`);
 
   if (isDoubtMsg && GROQ_API_KEY) {
     try {
       console.log(`[Groq] Attempting answer for: "${message.slice(0,80)}"`);
-      const aiAnswer = await groqAnswer(message, qIndustry0, qSettings0.business_name || "", qSettings0.faq_text || "", lang);
+      const aiAnswer = await groqAnswer(message, qIndustry0, qSettings0.business_name || "", qFaq0, lang);
       if (aiAnswer) {
         console.log(`[Groq] Got answer (${aiAnswer.length} chars)`);
-        const aiPrefix = {
-          hindi   : "🤖 *AI Assistant:*\n\n",
-          hinglish: "🤖 *AI Assistant:*\n\n",
-          english : "🤖 *AI Assistant:*\n\n",
-        };
+        const aiPrefix = { hindi: "🤖 *AI Assistant:*\n\n", hinglish: "🤖 *AI Assistant:*\n\n", english: "🤖 *AI Assistant:*\n\n" };
         await send(customerId, (aiPrefix[lang] || aiPrefix.english) + aiAnswer);
         return;
       }
       console.log(`[Groq] Returned null — falling through`);
     } catch (aiErr) {
       console.error("[Groq] Error:", aiErr.message);
-      // fall through to normal search
     }
   }
+
+  const intent = await ai.extractSearchIntent(message);
 
   if (!intent.product) {
 
