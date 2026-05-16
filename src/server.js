@@ -3149,13 +3149,14 @@ app.get("/api/schedule", async (req, res) => {
 
 app.post("/api/schedule", async (req, res) => {
   const bid = getBid(req);
-  const { title, course_name, scheduled_at } = req.body;
+  const { title, course_name, course_id, notify_mode, scheduled_at } = req.body;
   if (!title || !scheduled_at) return res.status(400).json({ error: "title and scheduled_at required" });
   try {
     const id = Date.now().toString() + Math.random().toString(36).slice(2, 6);
     await db.query(
-      `INSERT INTO class_schedules (id, business_id, title, course_name, scheduled_at) VALUES ($1,$2,$3,$4,$5)`,
-      [id, bid, title, course_name || "", new Date(scheduled_at).toISOString()]
+      `INSERT INTO class_schedules (id, business_id, title, course_name, course_id, notify_mode, scheduled_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [id, bid, title, course_name || "", course_id || null, notify_mode || "all", new Date(scheduled_at).toISOString()]
     );
     res.json({ ok: true, id });
   } catch (e) {
@@ -3335,15 +3336,32 @@ async function checkClassReminders() {
       const phoneId   = sched.phone_number_id || DEFAULT_PHONE_ID;
       const token     = sched.token           || DEFAULT_WA_TOKEN;
 
-      // Get enrolled students for this business
-      const { rows: customers } = await db.query(
-        `SELECT id, name FROM bot_customers
-         WHERE id IN (
-           SELECT DISTINCT customer_id FROM orders
-           WHERE business_id=$1 AND status IN ('confirmed','delivered')
-         ) LIMIT 500`,
-        [sched.business_id]
-      );
+      // Get enrolled students — filter by course if notify_mode = 'course'
+      let customers;
+      if (sched.notify_mode === "course" && sched.course_id) {
+        // Only students who ordered this specific course (cart contains product with matching id)
+        const { rows } = await db.query(
+          `SELECT id, name FROM bot_customers
+           WHERE id IN (
+             SELECT DISTINCT customer_id FROM orders
+             WHERE business_id=$1 AND status IN ('confirmed','delivered')
+               AND cart @> $2::jsonb
+           ) LIMIT 500`,
+          [sched.business_id, JSON.stringify([{ id: sched.course_id }])]
+        );
+        customers = rows;
+      } else {
+        // All enrolled students
+        const { rows } = await db.query(
+          `SELECT id, name FROM bot_customers
+           WHERE id IN (
+             SELECT DISTINCT customer_id FROM orders
+             WHERE business_id=$1 AND status IN ('confirmed','delivered')
+           ) LIMIT 500`,
+          [sched.business_id]
+        );
+        customers = rows;
+      }
 
       // 60-min reminder
       if (!sched.reminder_60_sent && minsLeft >= 45 && minsLeft <= 75) {

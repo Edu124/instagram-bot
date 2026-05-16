@@ -22,6 +22,7 @@ async function setup() {
       rating         NUMERIC,
       in_stock       BOOLEAN NOT NULL DEFAULT true,
       tags           JSONB NOT NULL DEFAULT '[]',
+      product_number TEXT NOT NULL DEFAULT '',
       created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
@@ -217,6 +218,59 @@ async function setup() {
   await db.query(`CREATE INDEX IF NOT EXISTS photo_inquiries_status_idx ON photo_inquiries(status)`);
   await db.query(`CREATE INDEX IF NOT EXISTS photo_inquiries_cid_idx    ON photo_inquiries(customer_id)`);
 
+  // ── customer_queries ──────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS customer_queries (
+      id            TEXT PRIMARY KEY,
+      business_id   TEXT NOT NULL DEFAULT 'default',
+      customer_id   TEXT NOT NULL,
+      customer_name TEXT NOT NULL DEFAULT '',
+      message       TEXT NOT NULL DEFAULT '',
+      type          TEXT NOT NULL DEFAULT 'query',
+      status        TEXT NOT NULL DEFAULT 'pending',
+      owner_reply   TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      replied_at    TIMESTAMPTZ
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS queries_bid_idx    ON customer_queries(business_id)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS queries_status_idx ON customer_queries(status)`);
+
+  // ── class_schedules ───────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS class_schedules (
+      id               TEXT PRIMARY KEY,
+      business_id      TEXT NOT NULL DEFAULT 'default',
+      title            TEXT NOT NULL DEFAULT '',
+      course_name      TEXT NOT NULL DEFAULT '',
+      course_id        TEXT,
+      notify_mode      TEXT NOT NULL DEFAULT 'all',
+      scheduled_at     TIMESTAMPTZ NOT NULL,
+      reminder_60_sent BOOLEAN NOT NULL DEFAULT false,
+      reminder_15_sent BOOLEAN NOT NULL DEFAULT false,
+      created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  // Migrate existing tables — add columns added after initial deploy
+  await db.query(`ALTER TABLE class_schedules ADD COLUMN IF NOT EXISTS course_id   TEXT`);
+  await db.query(`ALTER TABLE class_schedules ADD COLUMN IF NOT EXISTS notify_mode TEXT NOT NULL DEFAULT 'all'`);
+  await db.query(`CREATE INDEX IF NOT EXISTS schedules_bid_idx ON class_schedules(business_id)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS schedules_time_idx ON class_schedules(scheduled_at)`);
+
+  // ── order_reviews ─────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS order_reviews (
+      id          TEXT PRIMARY KEY,
+      business_id TEXT NOT NULL DEFAULT 'default',
+      customer_id TEXT NOT NULL,
+      customer_name TEXT NOT NULL DEFAULT '',
+      order_id    TEXT,
+      rating      INTEGER NOT NULL,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS reviews_bid_idx ON order_reviews(business_id)`);
+
   // ── whatsapp_numbers ──────────────────────────────────────────────────────────
   // Maps Meta phone_number_id → business_id for multi-tenant routing
   await db.query(`
@@ -230,6 +284,13 @@ async function setup() {
     )
   `);
   await db.query(`CREATE INDEX IF NOT EXISTS wa_numbers_bid_idx ON whatsapp_numbers(business_id)`);
+
+  // ── Column migrations (safe on existing Railway PG DBs) ──────────────────────
+  // NOTE: Also run these in Supabase SQL editor:
+  //   ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS faq_text TEXT NOT NULL DEFAULT '';
+  //   ALTER TABLE catalog ADD COLUMN IF NOT EXISTS stock_count INTEGER NOT NULL DEFAULT -1;
+  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS faq_text TEXT NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE catalog            ADD COLUMN IF NOT EXISTS stock_count INTEGER NOT NULL DEFAULT -1`);
 
   console.log("[Setup] All tables ready ✓");
 }
