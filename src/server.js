@@ -41,6 +41,51 @@ const waNumbers    = require("./wa_numbers");  // multi-tenant phone routing
 // ── Groq AI — doubt solving for education (free tier, Llama 3) ────────────────
 // Uses HTTPS directly so no npm package needed. Set GROQ_API_KEY in Railway env.
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
+
+// ── Groq rate limiter (in-memory, resets at midnight) ─────────────────────────
+// Limits: 5 calls per customer per day, 100 calls per business per day
+const GROQ_LIMIT_PER_CUSTOMER = 5;
+const GROQ_LIMIT_PER_BUSINESS  = 100;
+const _groqUsage = {};  // key: "cust_<id>_<YYYY-MM-DD>" or "biz_<id>_<YYYY-MM-DD>"
+
+function _groqDay() {
+  return new Date().toISOString().slice(0, 10); // "2025-05-16"
+}
+
+function _groqAllowed(customerId, bizId) {
+  const day     = _groqDay();
+  const custKey = `cust_${customerId}_${day}`;
+  const bizKey  = `biz_${bizId}_${day}`;
+
+  const custCount = _groqUsage[custKey] || 0;
+  const bizCount  = _groqUsage[bizKey]  || 0;
+
+  if (custCount >= GROQ_LIMIT_PER_CUSTOMER) {
+    console.log(`[Groq] Rate limit hit for customer ${customerId} (${custCount}/${GROQ_LIMIT_PER_CUSTOMER} today)`);
+    return false;
+  }
+  if (bizCount >= GROQ_LIMIT_PER_BUSINESS) {
+    console.log(`[Groq] Rate limit hit for business ${bizId} (${bizCount}/${GROQ_LIMIT_PER_BUSINESS} today)`);
+    return false;
+  }
+  return true;
+}
+
+function _groqRecord(customerId, bizId) {
+  const day     = _groqDay();
+  const custKey = `cust_${customerId}_${day}`;
+  const bizKey  = `biz_${bizId}_${day}`;
+  _groqUsage[custKey] = (_groqUsage[custKey] || 0) + 1;
+  _groqUsage[bizKey]  = (_groqUsage[bizKey]  || 0) + 1;
+}
+
+// Clean up old day keys every hour so memory doesn't grow
+setInterval(() => {
+  const today = _groqDay();
+  for (const key of Object.keys(_groqUsage)) {
+    if (!key.endsWith(today)) delete _groqUsage[key];
+  }
+}, 60 * 60 * 1000);
 // Build Groq system prompt — two modes:
 //  • faqOnly  (non-education): ONLY answer from owner's FAQ, no extra knowledge
 //  • doubt    (education):     Teaching assistant with full subject knowledge
@@ -884,7 +929,7 @@ async function handleSearch(customerId, sess, message, name) {
   const isEducation = qIndustry0.includes("education");
   // For non-education: only call Groq if owner has set FAQ text (saves tokens)
   // For education: always call Groq for doubts/questions
-  const shouldCallGroq = isDoubtMsg && GROQ_API_KEY && (isEducation || qFaq0.length > 0);
+  const shouldCallGroq = isDoubtMsg && GROQ_API_KEY && (isEducation || qFaq0.length > 0) && _groqAllowed(customerId, bizId);
   // faqOnly mode: non-education industries that have FAQ text → strict FAQ-only answer
   const faqOnlyMode = !isEducation && qFaq0.length > 0;
 
@@ -895,6 +940,7 @@ async function handleSearch(customerId, sess, message, name) {
       console.log(`[Groq] Attempting (faqOnly=${faqOnlyMode}): "${message.slice(0,80)}"`);
       const aiAnswer = await groqAnswer(message, qIndustry0, qSettings0.business_name || "", qFaq0, lang, faqOnlyMode);
       if (aiAnswer) {
+        _groqRecord(customerId, bizId);   // count this usage
         console.log(`[Groq] Got answer (${aiAnswer.length} chars)`);
         const aiPrefix = { hindi: "🤖 *AI Assistant:*\n\n", hinglish: "🤖 *AI Assistant:*\n\n", english: "🤖 *AI Assistant:*\n\n" };
         await send(customerId, (aiPrefix[lang] || aiPrefix.english) + aiAnswer);
@@ -916,11 +962,12 @@ async function handleSearch(customerId, sess, message, name) {
     const qFaqText   = (qSettings.faq_text || "").trim();
     const isEduFall  = qIndustry.includes("education");
     const faqOnlyFall = !isEduFall && qFaqText.length > 0;
-    // Skip Groq if non-education and no FAQ set — just forward to owner
-    if (GROQ_API_KEY && (isEduFall || qFaqText.length > 0)) {
+    // Skip Groq if non-education, no FAQ set, or rate limit hit
+    if (GROQ_API_KEY && (isEduFall || qFaqText.length > 0) && _groqAllowed(customerId, bizId)) {
       try {
         const aiAnswer = await groqAnswer(message, qIndustry, qSettings.business_name || "", qFaqText, lang, faqOnlyFall);
         if (aiAnswer) {
+          _groqRecord(customerId, bizId);  // count this usage
           const aiPrefix = {
             hindi   : "🤖 *AI Assistant:*\n\n",
             hinglish: "🤖 *AI Assistant:*\n\n",
