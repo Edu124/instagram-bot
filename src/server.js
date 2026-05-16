@@ -38,6 +38,81 @@ const photoInquiry = require("./photo_inquiry");
 const trackingMod  = require("./tracking");
 const waNumbers    = require("./wa_numbers");  // multi-tenant phone routing
 
+// ── Groq AI — doubt solving for education (free tier, Llama 3) ────────────────
+// Uses HTTPS directly so no npm package needed. Set GROQ_API_KEY in Railway env.
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
+async function groqAnswer(question, industry = "", businessName = "", faqContext = "") {
+  if (!GROQ_API_KEY) return null;
+  const https = require("https");
+  return new Promise((resolve) => {
+    const ind = (industry || "").toLowerCase();
+    let roleDesc, helpScope, redirectHint;
+    if (ind.includes("education")) {
+      roleDesc    = `a helpful teaching assistant for ${businessName || "a coaching institute"}`;
+      helpScope   = "Answer academic doubts, explain concepts, solve problems, and help students understand topics.";
+      redirectHint = "If the question is not academic or course-related, politely ask them to contact the teacher directly.";
+    } else if (ind.includes("cloth") || ind.includes("fashion") || ind.includes("apparel")) {
+      roleDesc    = `a knowledgeable shopping assistant for ${businessName || "a clothing store"}`;
+      helpScope   = "Help with fabric/material info, sizing guidance, outfit suggestions, care instructions, and fashion advice.";
+      redirectHint = "If you cannot answer (e.g. stock availability, specific prices), ask them to contact the store directly.";
+    } else if (ind.includes("kirana") || ind.includes("grocery") || ind.includes("food") || ind.includes("supermart")) {
+      roleDesc    = `a helpful store assistant for ${businessName || "a grocery store"}`;
+      helpScope   = "Help with product info, ingredient questions, storage tips, recipe ideas, and general grocery queries.";
+      redirectHint = "If you cannot answer (e.g. exact availability or pricing), ask them to contact the store directly.";
+    } else if (ind.includes("tourism") || ind.includes("travel") || ind.includes("tour")) {
+      roleDesc    = `a knowledgeable travel assistant for ${businessName || "a travel agency"}`;
+      helpScope   = "Help with destination info, travel tips, visa questions, packing advice, and general itinerary guidance.";
+      redirectHint = "If you cannot answer (e.g. specific package prices or availability), ask them to contact the agency directly.";
+    } else if (ind.includes("restaurant") || ind.includes("cafe") || ind.includes("hotel") || ind.includes("food")) {
+      roleDesc    = `a helpful assistant for ${businessName || "a restaurant"}`;
+      helpScope   = "Help with menu questions, ingredient/allergen info, cuisine explanations, and dining suggestions.";
+      redirectHint = "If you cannot answer (e.g. table availability or specific pricing), ask them to contact the restaurant directly.";
+    } else {
+      roleDesc    = `a helpful customer service assistant for ${businessName || "a business"}`;
+      helpScope   = "Answer general customer queries, provide helpful information, and assist with common questions.";
+      redirectHint = "If you cannot confidently answer, politely ask them to contact the business directly.";
+    }
+    const faqSection = faqContext
+      ? `\n\nHere are some FAQs about this business — use them to answer if relevant:\n${faqContext}`
+      : "";
+    const systemPrompt =
+      `You are ${roleDesc}. ${helpScope}${faqSection}` +
+      ` Reply clearly and concisely in the same language the customer used (Hindi/English/Hinglish).` +
+      ` Keep the reply under 300 words. ${redirectHint}`;
+    const body = JSON.stringify({
+      model   : "llama3-8b-8192",
+      messages: [
+        { role: "system",    content: systemPrompt },
+        { role: "user",      content: question },
+      ],
+      max_tokens  : 512,
+      temperature : 0.4,
+    });
+    const req = https.request({
+      hostname: "api.groq.com",
+      path    : "/openai/v1/chat/completions",
+      method  : "POST",
+      headers : {
+        "Authorization": `Bearer ${GROQ_API_KEY}`,
+        "Content-Type" : "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve(parsed.choices?.[0]?.message?.content?.trim() || null);
+        } catch { resolve(null); }
+      });
+    });
+    req.on("error", () => resolve(null));
+    req.write(body);
+    req.end();
+  });
+}
+
 // ── Unified send helper ───────────────────────────────────────────────────────
 // Reads per-client phoneId + token from session (set during webhook routing).
 // Falls back to env vars for dev/single-tenant mode.
@@ -300,6 +375,27 @@ async function routeMessage(customerId, sess, message, name) {
   if (message.includes("SELLY_CART:")) return handleSellyCart(customerId, sess, message, name);
 
   // ── Global commands (any state) ───────────────────────────────────────────
+  // ── Star rating reply ─────────────────────────────────────────────────────────
+  if (/^[135]$/.test(message.trim()) && sess.awaitingReview) {
+    const rating = parseInt(message.trim(), 10);
+    try {
+      const rid = Date.now().toString() + Math.random().toString(36).slice(2, 6);
+      await db.query(
+        `INSERT INTO order_reviews (id, business_id, customer_id, customer_name, order_id, rating)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [rid, bizId, customerId, name, sess.awaitingReview, rating]
+      );
+    } catch (_) {}
+    session.update(customerId, { awaitingReview: null });
+    const stars = "⭐".repeat(rating);
+    const msgs = {
+      hindi   : `${stars} Thanks ${name}! आपका feedback मिल गया। 😊`,
+      hinglish: `${stars} Thanks ${name}! Feedback mil gaya. 😊`,
+      english : `${stars} Thank you ${name}! Your feedback means a lot to us. 😊`,
+    };
+    return send(customerId, msgs[lang] || msgs.english);
+  }
+
   if (isLoyaltyRequest(message))    return handleLoyaltyCheck(customerId, sess);
   if (isTrackingRequest(message))   return handleTracking(customerId, sess, message);
   if (isReturnRequest(message))     return handleReturn(customerId, sess, message);
@@ -563,6 +659,17 @@ async function handleStatusProductResponse(customerId, sess, message) {
 // type: "query" (general question) | "product_request" (not found in catalog)
 // ─────────────────────────────────────────────────────────────────────────────
 async function notifyOwner(bizId, customerId, customerName, message, type = "query") {
+  // Save query to DB for the inbox (non-fatal)
+  try {
+    const qid = Date.now().toString() + Math.random().toString(36).slice(2, 6);
+    await db.query(
+      `INSERT INTO customer_queries (id, business_id, customer_id, customer_name, message, type, status)
+       VALUES ($1,$2,$3,$4,$5,$6,'pending')
+       ON CONFLICT (id) DO NOTHING`,
+      [qid, bizId, customerId, customerName, message, type]
+    );
+  } catch (_) {}
+
   try {
     const bizSettings = await getSettings(bizId);
     const rawNum      = (bizSettings.whatsapp_number || "").replace(/[^0-9]/g, "");
@@ -670,6 +777,27 @@ async function handleSearch(customerId, sess, message, name) {
   const intent = await ai.extractSearchIntent(message);
 
   if (!intent.product) {
+
+    // Try Groq AI to answer customer queries before forwarding to owner
+    const qSettings = await getSettings(bizId);
+    const qIndustry = qSettings.industry || "";
+    if (GROQ_API_KEY) {
+      try {
+        const aiAnswer = await groqAnswer(message, qIndustry, qSettings.business_name || "", qSettings.faq_text || "");
+        if (aiAnswer) {
+          const aiPrefix = {
+            hindi   : "🤖 *AI Assistant:*\n\n",
+            hinglish: "🤖 *AI Assistant:*\n\n",
+            english : "🤖 *AI Assistant:*\n\n",
+          };
+          await send(customerId, (aiPrefix[lang] || aiPrefix.english) + aiAnswer);
+          return;
+        }
+      } catch (aiErr) {
+        console.error("[Groq] Error:", aiErr.message);
+        // fall through to owner forward
+      }
+    }
 
     // Not a product search — customer asked something else (delivery, timings, etc.)
     // Tell customer their query is forwarded, then notify the owner.
@@ -1323,6 +1451,27 @@ async function placeOrder(customerId, sess, paymentMode) {
   await customers.touch(customerId, { name: sess.name, mobile: sess.mobile }, bizId);
   await customers.recordOrder(customerId, order, bizId);
   session.update(customerId, { currentOrderId: order.id });
+
+  // ── Notify owner on WhatsApp when a new order comes in ────────────────────
+  const _ownerSettings = bizSettings;
+  const _ownerNum      = (_ownerSettings.whatsapp_number || "").replace(/[^0-9]/g, "");
+  if (_ownerNum) {
+    const _ctx       = _waCtx(customerId);
+    const _custLink  = `https://wa.me/${customerId.replace(/[^0-9]/g, "")}`;
+    const _itemsText = (sess.cart || []).map(i =>
+      `• ${i.name}${i.productNumber ? ` [${i.productNumber}]` : ""}${i.size ? ` (${i.size})` : ""} ×${i.qty || 1} — ₹${i.price}`
+    ).join("\n");
+    const _orderTitle = isEduOrder ? "🎓 New Enrollment!" : "🛍️ New Order!";
+    const _ownerMsg =
+      `${_orderTitle}\n\n` +
+      `👤 *${sess.name}*  📱 ${sess.mobile}\n` +
+      (sess.address ? `📍 ${sess.address}\n` : "") +
+      `💳 ${paymentMode.toUpperCase()}\n\n` +
+      `📦 *Items:*\n${_itemsText}\n\n` +
+      `💰 *Total: ₹${bill.total}*\n\n` +
+      `💬 Reply: ${_custLink}`;
+    wa.send(_ownerNum, _ownerMsg, _ctx.phoneId, _ctx.token).catch(() => {});
+  }
 
   // ── Build order summary ────────────────────────────────────────────────────
   const itemLines = bill.items.map(i =>
@@ -2734,11 +2883,149 @@ app.post("/api/billing/payment", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// QUERY INBOX
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/api/queries", async (req, res) => {
+  const bid    = getBid(req);
+  const status = req.query.status || null;
+  try {
+    const where = status ? `WHERE business_id=$1 AND status=$2` : `WHERE business_id=$1`;
+    const vals  = status ? [bid, status] : [bid];
+    const { rows } = await db.query(
+      `SELECT * FROM customer_queries ${where} ORDER BY created_at DESC LIMIT 200`, vals
+    );
+    res.json({ queries: rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/queries/:id/reply", async (req, res) => {
+  const bid     = getBid(req);
+  const qId     = req.params.id;
+  const { reply } = req.body;
+  if (!reply?.trim()) return res.status(400).json({ error: "reply required" });
+  try {
+    const { rows } = await db.query(`SELECT * FROM customer_queries WHERE id=$1 AND business_id=$2`, [qId, bid]);
+    if (!rows.length) return res.status(404).json({ error: "Query not found" });
+    const q = rows[0];
+    // Send WhatsApp message to customer
+    const sess    = session.get(q.customer_id);
+    const phoneId = sess?.phoneId || DEFAULT_PHONE_ID;
+    const token   = sess?.waToken || DEFAULT_WA_TOKEN;
+    await wa.send(q.customer_id, `💬 *Reply from ${(await getSettings(bid)).business_name || "the team"}:*\n\n${reply.trim()}`, phoneId, token);
+    // Update DB
+    await db.query(
+      `UPDATE customer_queries SET status='replied', owner_reply=$1, replied_at=NOW() WHERE id=$2`,
+      [reply.trim(), qId]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLASS SCHEDULES (education)
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/api/schedule", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM class_schedules WHERE business_id=$1 ORDER BY scheduled_at ASC`, [bid]
+    );
+    res.json({ schedules: rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/schedule", async (req, res) => {
+  const bid = getBid(req);
+  const { title, course_name, scheduled_at } = req.body;
+  if (!title || !scheduled_at) return res.status(400).json({ error: "title and scheduled_at required" });
+  try {
+    const id = Date.now().toString() + Math.random().toString(36).slice(2, 6);
+    await db.query(
+      `INSERT INTO class_schedules (id, business_id, title, course_name, scheduled_at) VALUES ($1,$2,$3,$4,$5)`,
+      [id, bid, title, course_name || "", new Date(scheduled_at).toISOString()]
+    );
+    res.json({ ok: true, id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/schedule/:id", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    await db.query(`DELETE FROM class_schedules WHERE id=$1 AND business_id=$2`, [req.params.id, bid]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REVIEWS
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/api/reviews", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM order_reviews WHERE business_id=$1 ORDER BY created_at DESC LIMIT 200`, [bid]
+    );
+    const avg = rows.length
+      ? (rows.reduce((s, r) => s + r.rating, 0) / rows.length).toFixed(1)
+      : null;
+    res.json({ reviews: rows, average: avg, total: rows.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOW STOCK ALERTS
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/api/catalog/low-stock", async (req, res) => {
+  const bid       = getBid(req);
+  const threshold = parseInt(req.query.threshold || "5", 10);
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM catalog WHERE business_id=$1 AND stock_count >= 0 AND stock_count <= $2 ORDER BY stock_count ASC`,
+      [bid, threshold]
+    );
+    res.json({ products: rows.map(r => ({
+      id: r.id, name: r.name, stockCount: r.stock_count, price: r.price, category: r.category,
+    })) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TEST CHAT (no WhatsApp needed — used by test-chat.html)
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/test/chat", async (req, res) => {
-  const { subscriber_id, text, first_name = "TestUser" } = req.body;
+  const { subscriber_id, text, first_name = "TestUser", industry } = req.body;
   if (!subscriber_id) return res.status(400).json({ error: "subscriber_id required" });
+
+  // If an industry override is provided, inject a test settings object into cache
+  // so routeMessage uses it without needing a real business in the DB.
+  const testBid = industry ? `_test_${industry}` : DEFAULT_BUSINESS_ID;
+  if (industry) {
+    _settingsCache[testBid]     = {
+      business_id  : testBid,
+      business_name: `Test ${industry.charAt(0).toUpperCase() + industry.slice(1)}`,
+      industry,
+      gst_enabled  : false,
+      delivery_charge: 0,
+      free_above   : 0,
+      cod_fee      : 0,
+      faq_text     : "",
+    };
+    _settingsCacheTime[testBid] = Date.now();
+  }
 
   const replies = [];
   wa._testMode    = true;
@@ -2746,7 +3033,9 @@ app.post("/test/chat", async (req, res) => {
 
   try {
     await customers.touch(subscriber_id, { name: first_name, first_name });
-    let sess = session.get(subscriber_id) || session.create(subscriber_id, { name: first_name, first_name });
+    let sess = session.get(subscriber_id) || session.create(subscriber_id, { name: first_name, first_name, businessId: testBid });
+    if (industry) session.update(subscriber_id, { businessId: testBid });
+    sess = session.get(subscriber_id);
 
     if (!sess.lang) {
       const detected = language.detectLanguage(text);
@@ -2816,6 +3105,75 @@ async function checkFestivalBroadcasts() {
 }
 setInterval(() => checkFestivalBroadcasts().catch(e => console.error("[festivals] check failed:", e.message)), 6 * 60 * 60 * 1000);
 
+// ── Class reminder cron — runs every 5 min ────────────────────────────────────
+async function checkClassReminders() {
+  try {
+    const now      = new Date();
+    const in75min  = new Date(now.getTime() + 75 * 60 * 1000);
+    const in10min  = new Date(now.getTime() + 10 * 60 * 1000);
+
+    // Get all upcoming schedules in the next 75 minutes that haven't been reminded
+    const { rows: schedules } = await db.query(
+      `SELECT cs.*, ws.token, ws.phone_number_id
+       FROM class_schedules cs
+       LEFT JOIN whatsapp_numbers ws ON ws.business_id = cs.business_id AND ws.active = true
+       WHERE cs.scheduled_at BETWEEN $1 AND $2
+         AND (cs.reminder_60_sent = false OR cs.reminder_15_sent = false)`,
+      [now.toISOString(), in75min.toISOString()]
+    );
+
+    for (const sched of schedules) {
+      const classTime = new Date(sched.scheduled_at);
+      const minsLeft  = Math.round((classTime - now) / 60000);
+      const phoneId   = sched.phone_number_id || DEFAULT_PHONE_ID;
+      const token     = sched.token           || DEFAULT_WA_TOKEN;
+
+      // Get enrolled students for this business
+      const { rows: customers } = await db.query(
+        `SELECT id, name FROM bot_customers
+         WHERE id IN (
+           SELECT DISTINCT customer_id FROM orders
+           WHERE business_id=$1 AND status IN ('confirmed','delivered')
+         ) LIMIT 500`,
+        [sched.business_id]
+      );
+
+      // 60-min reminder
+      if (!sched.reminder_60_sent && minsLeft >= 45 && minsLeft <= 75) {
+        for (const cust of customers) {
+          const lang = session.get(cust.id)?.lang || "english";
+          const msgs = {
+            hindi   : `📚 *Reminder!* ${cust.name}, आपकी class *"${sched.title}"* 1 घंटे में शुरू होगी! तैयार रहें। 🎓`,
+            hinglish: `📚 *Reminder!* ${cust.name}, aapki class *"${sched.title}"* 1 ghante mein start hogi! Ready raho. 🎓`,
+            english : `📚 *Reminder!* ${cust.name}, your class *"${sched.title}"* starts in 1 hour! Get ready. 🎓`,
+          };
+          await wa.send(cust.id, msgs[lang] || msgs.english, phoneId, token).catch(() => {});
+        }
+        await db.query(`UPDATE class_schedules SET reminder_60_sent=true WHERE id=$1`, [sched.id]);
+        console.log(`[ClassReminder] Sent 60-min reminder for "${sched.title}" to ${customers.length} students`);
+      }
+
+      // 15-min reminder
+      if (!sched.reminder_15_sent && minsLeft >= 5 && minsLeft <= 20) {
+        for (const cust of customers) {
+          const lang = session.get(cust.id)?.lang || "english";
+          const msgs = {
+            hindi   : `⏰ *Class in 15 min!* ${cust.name}, *"${sched.title}"* अभी शुरू होने वाली है! Join करें। 📖`,
+            hinglish: `⏰ *Class in 15 min!* ${cust.name}, *"${sched.title}"* start hone wali hai! Join karo. 📖`,
+            english : `⏰ *Class in 15 min!* ${cust.name}, *"${sched.title}"* is about to start! Join now. 📖`,
+          };
+          await wa.send(cust.id, msgs[lang] || msgs.english, phoneId, token).catch(() => {});
+        }
+        await db.query(`UPDATE class_schedules SET reminder_15_sent=true WHERE id=$1`, [sched.id]);
+        console.log(`[ClassReminder] Sent 15-min reminder for "${sched.title}" to ${customers.length} students`);
+      }
+    }
+  } catch (e) {
+    console.error("[ClassReminder] check failed:", e.message);
+  }
+}
+setInterval(() => checkClassReminders(), 5 * 60 * 1000); // every 5 min
+
 // Review request (24h after delivery)
 function scheduleReviewRequest(customerId, orderId, customerName) {
   setTimeout(async () => {
@@ -2828,6 +3186,8 @@ function scheduleReviewRequest(customerId, orderId, customerName) {
         hinglish: `Hey ${customerName}! 😊\nOrder #SL${orderId} kaisa laga?\n\n⭐1 Poor · ⭐⭐⭐3 Good · ⭐⭐⭐⭐⭐5 Excellent\n\nFeedback do! 🙏`,
         english : `Hi ${customerName}! 😊\nHow was your order #SL${orderId}?\n\n⭐1 Poor · ⭐⭐⭐3 Good · ⭐⭐⭐⭐⭐5 Excellent\n\nYour feedback helps us improve 🙏`,
       };
+      // Flag session so routeMessage knows next 1/3/5 reply is a review
+      session.update(customerId, { awaitingReview: orderId });
       await wa.send(customerId, msgs[lang] || msgs.english);
     } catch {}
   }, 24 * 60 * 60 * 1000);

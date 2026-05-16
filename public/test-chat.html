@@ -437,15 +437,23 @@
 
   <hr class="panel-divider">
 
+  <!-- Industry mode toggle -->
+  <div class="panel-section">
+    <div class="panel-label">🏭 Industry Mode</div>
+    <select id="industrySelect" onchange="switchIndustry(this.value)"
+      style="width:100%;background:#111133;border:1px solid #2a2a4a;color:#a0a0d0;border-radius:8px;padding:7px 10px;font-size:12px;cursor:pointer;">
+      <option value="product">🛍️ Product / Clothing</option>
+      <option value="education">🎓 Education / Coaching</option>
+      <option value="tourism">✈️ Tourism / Travel</option>
+      <option value="kirana">🛒 Kirana / Grocery</option>
+      <option value="cakes">🎂 Cakes / Bakery</option>
+    </select>
+  </div>
+
   <!-- Quick-test scenarios -->
   <div class="panel-section">
     <div class="panel-label">⚡ Quick Tests</div>
-    <button class="scenario-btn" onclick="runScenario('search')">🔍 Search: jeans under ₹800</button>
-    <button class="scenario-btn" onclick="runScenario('kurti')">👗 Search: cotton kurti size M</button>
-    <button class="scenario-btn" onclick="runScenario('track')">📦 Track my order</button>
-    <button class="scenario-btn" onclick="runScenario('history')">📋 My order history</button>
-    <button class="scenario-btn" onclick="runScenario('referral')">🎟️ My referral code</button>
-    <button class="scenario-btn" onclick="runScenario('return')">🔄 I want to return</button>
+    <div id="scenarioBtns"></div>
   </div>
 
   <button class="reset-btn" onclick="resetConversation()">↺ New Customer Session</button>
@@ -455,7 +463,106 @@
 
 <script>
   let SUBSCRIBER_ID = "test_" + Math.random().toString(36).slice(2, 8);
-  const SERVER = "http://localhost:3000";
+  // Auto-detect server: use Railway URL if not running locally
+  const SERVER = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "http://localhost:3000"
+    : window.location.origin;
+
+  // ── Industry scenarios ────────────────────────────────────────────────────
+  const INDUSTRY_SCENARIOS = {
+    product: {
+      label : "🛍️ TrendStore",
+      sub   : "Clothing Store · Active now",
+      avatar: "🛍️",
+      chips : ["👖 jeans", "👗 kurti", "👕 t-shirt", "📦 track order", "📋 my orders"],
+      tests : [
+        { key:"search",   icon:"🔍", label:"Search: jeans under ₹800",   text:"jeans under 800" },
+        { key:"kurti",    icon:"👗", label:"Search: cotton kurti size M", text:"cotton kurti size M" },
+        { key:"track",    icon:"📦", label:"Track my order",              text:"track my order" },
+        { key:"history",  icon:"📋", label:"My order history",            text:"my orders" },
+        { key:"referral", icon:"🎟️", label:"My referral code",            text:"what is my referral code" },
+        { key:"return",   icon:"🔄", label:"I want to return",            text:"I want to return my order" },
+      ],
+    },
+    education: {
+      label : "🎓 EduCoach",
+      sub   : "Coaching Institute · Active now",
+      avatar: "🎓",
+      chips : ["📚 courses", "📐 explain algebra", "🔬 photosynthesis", "📦 my enrollment", "❓ doubt"],
+      tests : [
+        { key:"courses",   icon:"📚", label:"Show all courses",              text:"show me courses" },
+        { key:"enroll",    icon:"✍️",  label:"Enroll in maths",              text:"I want to enroll in maths" },
+        { key:"doubt1",    icon:"📐", label:"Groq: explain algebra",         text:"explain algebra in simple terms" },
+        { key:"doubt2",    icon:"🔬", label:"Groq: what is photosynthesis",  text:"what is photosynthesis" },
+        { key:"doubt3",    icon:"⚛️",  label:"Groq: Newton's second law",    text:"explain newton second law" },
+        { key:"doubt4",    icon:"🧮", label:"Groq: solve x²+5x+6=0",        text:"solve x squared plus 5x plus 6 equals 0" },
+        { key:"faq1",      icon:"🚌", label:"Groq: timing question (FAQ)",   text:"what time do classes start" },
+        { key:"history",   icon:"📋", label:"My enrollment history",         text:"my orders" },
+      ],
+    },
+    tourism: {
+      label : "✈️ TravelBot",
+      sub   : "Travel Agency · Active now",
+      avatar: "✈️",
+      chips : ["🏝️ packages", "📦 my booking", "📋 bookings", "❓ doubt"],
+      tests : [
+        { key:"packages", icon:"🏝️", label:"Show tour packages",      text:"show packages" },
+        { key:"book",     icon:"✍️",  label:"Book Goa tour",           text:"I want to book goa tour" },
+        { key:"faq",      icon:"❓", label:"Groq: visa required?",    text:"do I need a visa for goa" },
+        { key:"history",  icon:"📋", label:"My booking history",      text:"my orders" },
+      ],
+    },
+    kirana: {
+      label : "🛒 KiranaBot",
+      sub   : "Grocery Store · Active now",
+      avatar: "🛒",
+      chips : ["🥛 milk", "🛒 order list", "📦 track order"],
+      tests : [
+        { key:"order",   icon:"🛒", label:"Place grocery order", text:"I want to order" },
+        { key:"milk",    icon:"🥛", label:"I need milk and bread", text:"milk and bread" },
+        { key:"track",   icon:"📦", label:"Track my order",       text:"track my order" },
+      ],
+    },
+    cakes: {
+      label : "🎂 CakeShop",
+      sub   : "Bakery · Active now",
+      avatar: "🎂",
+      chips : ["🎂 cakes", "🧁 cupcakes", "📦 track order"],
+      tests : [
+        { key:"cakes",   icon:"🎂", label:"Show cakes",           text:"show cakes" },
+        { key:"custom",  icon:"✏️",  label:"Custom birthday cake", text:"I want a custom birthday cake" },
+        { key:"track",   icon:"📦", label:"Track my order",        text:"track my order" },
+      ],
+    },
+  };
+
+  let currentIndustry = new URLSearchParams(window.location.search).get("industry") || "product";
+
+  function switchIndustry(industry) {
+    currentIndustry = industry;
+    const cfg = INDUSTRY_SCENARIOS[industry] || INDUSTRY_SCENARIOS.product;
+    // Update header
+    document.querySelector(".profile-name").textContent = cfg.label;
+    document.querySelector(".profile-sub").textContent  = cfg.sub;
+    document.querySelector(".avatar").textContent       = cfg.avatar;
+    // Update scenario buttons
+    renderScenarioBtns(cfg.tests);
+    // Update default quick-reply chips
+    defaultChips = cfg.chips;
+    updateQuickReplies([]);
+    // Reset session so industry takes effect
+    resetConversation();
+  }
+
+  function renderScenarioBtns(tests) {
+    document.getElementById("scenarioBtns").innerHTML = tests.map(t =>
+      `<button class="scenario-btn" onclick="quickSend('${t.text.replace(/'/g,"\\'")}')">${t.icon} ${t.label}</button>`
+    ).join("");
+  }
+
+  function quickSend(text) { $input.value = text; sendMsg(); }
+
+  let defaultChips = INDUSTRY_SCENARIOS[currentIndustry].chips;
 
   const $msgs   = document.getElementById("messages");
   const $input  = document.getElementById("msgInput");
@@ -527,7 +634,7 @@
       const res  = await fetch(`${SERVER}/test/chat`, {
         method : "POST",
         headers: { "Content-Type": "application/json" },
-        body   : JSON.stringify({ subscriber_id: SUBSCRIBER_ID, text, first_name: "TestUser" }),
+        body   : JSON.stringify({ subscriber_id: SUBSCRIBER_ID, text, first_name: "TestUser", industry: currentIndustry }),
       });
       const data = await res.json();
       hideTyping();
@@ -551,8 +658,7 @@
   // ── Quick reply chips ─────────────────────────────────────────────────────
   function updateQuickReplies(replies) {
     if (!replies.length) {
-      // Default chips when no state-specific replies
-      replies = ["👖 jeans", "👗 kurti", "👕 t-shirt", "📦 track order", "📋 my orders"];
+      replies = defaultChips;
     }
     $qr.innerHTML = replies.map(r =>
       `<div class="qr-chip" onclick="sendQuick('${r.replace(/'/g, "\\'")}')">${renderText(r)}</div>`
@@ -634,6 +740,7 @@
         body   : JSON.stringify({
           subscriber_id: SUBSCRIBER_ID,
           first_name   : "TestUser",
+          industry     : currentIndustry,
           attachments  : [{ url: imageUrl, type: "image" }],
         }),
       });
@@ -650,20 +757,6 @@
     input.value = "";
   }
 
-  // ── Quick-test scenarios ──────────────────────────────────────────────────
-  const SCENARIOS = {
-    search  : "jeans under 800",
-    kurti   : "cotton kurti size M",
-    track   : "track my order",
-    history : "my orders",
-    referral: "what is my referral code",
-    return  : "I want to return my order",
-  };
-  function runScenario(key) {
-    const text = SCENARIOS[key];
-    if (text) { $input.value = text; sendMsg(); }
-  }
-
   // ── Reset conversation ────────────────────────────────────────────────────
   function resetConversation() {
     SUBSCRIBER_ID = "test_" + Math.random().toString(36).slice(2, 8);
@@ -675,21 +768,24 @@
     updateStats({ totalOrders:0, totalSpend:0, referralCount:0, referralEarnings:0, referralCode:"—", tags:[] });
     updateCart([]);
 
-    // Show welcome after a beat
+    const cfg = INDUSTRY_SCENARIOS[currentIndustry] || INDUSTRY_SCENARIOS.product;
     setTimeout(() => {
-      addMsg(
-        "Hey! 👋 Welcome to *TrendStore*.\n\n" +
-        "I'm your personal shopping assistant. Tell me what you're looking for!\n\n" +
-        "Example: _\"blue jeans under ₹800\"_ or _\"cotton kurti size M\"_",
-        "bot"
-      );
+      addMsg(`Hey! 👋 Welcome to *${cfg.label}*.\n\nI'm your assistant. How can I help you today?`, "bot");
       updateQuickReplies([]);
     }, 400);
   }
 
-  // ── Init: show welcome ────────────────────────────────────────────────────
+  // ── Init ──────────────────────────────────────────────────────────────────
+  // Set industry selector to match URL param or default
+  document.getElementById("industrySelect").value = currentIndustry;
+  const _initCfg = INDUSTRY_SCENARIOS[currentIndustry] || INDUSTRY_SCENARIOS.product;
+  document.querySelector(".profile-name").textContent = _initCfg.label;
+  document.querySelector(".profile-sub").textContent  = _initCfg.sub;
+  document.querySelector(".avatar").textContent       = _initCfg.avatar;
+  renderScenarioBtns(_initCfg.tests);
+  defaultChips = _initCfg.chips;
+
   resetConversation();
-  // Override the "New session started" text on first load
   $msgs.querySelector(".msg.status").textContent = "Today";
 </script>
 </body>
