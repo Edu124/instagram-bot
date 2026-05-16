@@ -486,10 +486,10 @@ async function routeMessage(customerId, sess, message, name) {
     const lines  = cart.map((item, i) => `${i + 1}. *${item.name}* — ₹${item.price}`).join("\n");
     const total  = cart.reduce((s, i) => s + i.price, 0);
     const header = { hindi: `🛒 *Aapka Cart:*\n\n`, hinglish: `🛒 *Your Cart:*\n\n`, english: `🛒 *Your Cart:*\n\n` };
-    const footer = { hindi: `\n\nTotal: ₹${total}\n\n"place order" type karo checkout ke liye`, hinglish: `\n\nTotal: ₹${total}\n\nType "place order" to checkout`, english: `\n\nTotal: ₹${total}\n\nType "place order" to checkout` };
+    const footer = { hindi: `\n\nTotal: ₹${total}\n\n"place order" type karein checkout ke liye ✅`, hinglish: `\n\nTotal: ₹${total}\n\n"place order" type karo checkout ke liye ✅`, english: `\n\nTotal: ₹${total}\n\nType *"place order"* to checkout ✅` };
     return send(customerId, (header[lang] || header.english) + lines + (footer[lang] || footer.english));
   }
-  const isPlaceOrder = /^(place order|order karo|checkout|done|order)$/i.test(message.trim());
+  const isPlaceOrder = /^(place order|place order from cart|order from cart|place my order|order now|confirm order|order karo|cart order|order kardo|checkout|done|order)$/i.test(message.trim());
   if (isPlaceOrder && (sess.cart || []).length) {
     // Trigger the normal checkout flow — set state to collecting_address or collecting_mobile
     const lang = sess.lang || "english";
@@ -1162,9 +1162,9 @@ async function handleSellyCart(customerId, sess, message, name) {
   const checkoutWord = cartInd.includes("education") ? "enroll" : "checkout";
 
   const confirmMsg = {
-    hindi   : `🛒 *${found.length} ${itemWord} cart में add हुए!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\n"done" reply करें ${checkoutWord} के लिए ✅\nया और ${itemWords} search करें 🔍`,
-    hinglish: `🛒 *${found.length} ${itemWord} cart mein add ho gaye!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\n"done" reply karo ${checkoutWord} ke liye ✅\nYa aur ${itemWords} search karo 🔍`,
-    english : `🛒 *${found.length} ${itemWord}${found.length > 1 ? "s" : ""} added!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\nReply *"done"* to ${checkoutWord} ✅\nOr search for more ${itemWords} 🔍`,
+    hindi   : `🛒 *${found.length} ${itemWord} cart में add हुए!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\n"place order" reply करें ${checkoutWord} के लिए ✅\nया और ${itemWords} search करें 🔍`,
+    hinglish: `🛒 *${found.length} ${itemWord} cart mein add ho gaye!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\n"place order" reply karo ${checkoutWord} ke liye ✅\nYa aur ${itemWords} search karo 🔍`,
+    english : `🛒 *${found.length} ${itemWord}${found.length > 1 ? "s" : ""} added!*${cartCountStr}\n\n${itemList}${notFoundStr}${totalStr}\n\nReply *"place order"* to ${checkoutWord} ✅\nOr search for more ${itemWords} 🔍`,
   };
   return send(customerId, confirmMsg[lang] || confirmMsg.english);
 }
@@ -1211,7 +1211,7 @@ async function handleProductSelection(customerId, sess, message) {
   const msg  = message.toLowerCase().trim();
   const lang = sess.lang || "english";
 
-  if (msg === "done" || msg === "checkout" || msg === "buy" || msg === "enroll") {
+  if (msg === "done" || msg === "checkout" || msg === "buy" || msg === "enroll" || msg === "place order" || msg === "place order from cart" || msg === "order from cart" || msg === "place my order" || msg === "order now" || msg === "confirm order" || msg === "order karo" || msg === "order kardo" || msg === "cart order") {
     if (!sess.cart?.length) {
       const doneSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
       const doneInd      = (doneSettings.industry || "").toLowerCase();
@@ -2908,6 +2908,7 @@ app.post("/api/settings", async (req, res) => {
     "industry",
     "upi_id","bank_details",          // online payment details
     "greeting_message","location_url", // bot customisation
+    "faq_text",                        // AI FAQ context
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {
