@@ -41,62 +41,64 @@ const waNumbers    = require("./wa_numbers");  // multi-tenant phone routing
 // ── Groq AI — doubt solving for education (free tier, Llama 3) ────────────────
 // Uses HTTPS directly so no npm package needed. Set GROQ_API_KEY in Railway env.
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
-async function groqAnswer(question, industry = "", businessName = "", faqContext = "") {
+// Build Groq system prompt (shared by text + vision)
+function _groqSystemPrompt(industry, businessName, faqContext, lang) {
+  const ind = (industry || "").toLowerCase();
+  let roleDesc, helpScope, redirectHint;
+  if (ind.includes("education")) {
+    roleDesc     = `a helpful teaching assistant for ${businessName || "a coaching institute"}`;
+    helpScope    = "Answer academic doubts, explain concepts, solve problems, and help students understand topics. If a student sends a photo of a question or problem, read it carefully and answer it.";
+    redirectHint = "If the question is not academic or course-related, politely ask them to contact the teacher directly.";
+  } else if (ind.includes("cloth") || ind.includes("fashion") || ind.includes("apparel")) {
+    roleDesc     = `a knowledgeable shopping assistant for ${businessName || "a clothing store"}`;
+    helpScope    = "Help with fabric/material info, sizing guidance, outfit suggestions, care instructions, and fashion advice.";
+    redirectHint = "If you cannot answer (e.g. stock availability, specific prices), ask them to contact the store directly.";
+  } else if (ind.includes("kirana") || ind.includes("grocery") || ind.includes("supermart")) {
+    roleDesc     = `a helpful store assistant for ${businessName || "a grocery store"}`;
+    helpScope    = "Help with product info, ingredient questions, storage tips, recipe ideas, and general grocery queries.";
+    redirectHint = "If you cannot answer (e.g. exact availability or pricing), ask them to contact the store directly.";
+  } else if (ind.includes("tourism") || ind.includes("travel") || ind.includes("tour")) {
+    roleDesc     = `a knowledgeable travel assistant for ${businessName || "a travel agency"}`;
+    helpScope    = "Help with destination info, travel tips, visa questions, packing advice, and general itinerary guidance.";
+    redirectHint = "If you cannot answer (e.g. specific package prices or availability), ask them to contact the agency directly.";
+  } else if (ind.includes("restaurant") || ind.includes("cafe") || ind.includes("hotel")) {
+    roleDesc     = `a helpful assistant for ${businessName || "a restaurant"}`;
+    helpScope    = "Help with menu questions, ingredient/allergen info, cuisine explanations, and dining suggestions.";
+    redirectHint = "If you cannot answer (e.g. table availability or specific pricing), ask them to contact the restaurant directly.";
+  } else {
+    roleDesc     = `a helpful customer service assistant for ${businessName || "a business"}`;
+    helpScope    = "Answer general customer queries, provide helpful information, and assist with common questions.";
+    redirectHint = "If you cannot confidently answer, politely ask them to contact the business directly.";
+  }
+  const faqSection = faqContext
+    ? `\n\nHere are some FAQs about this business — use them to answer if relevant:\n${faqContext}`
+    : "";
+  // Explicit language instruction — use detected session language, not guess
+  const langMap  = { hindi: "Hindi", hinglish: "Hinglish (mix of Hindi and English)", english: "English" };
+  const langNote = `You MUST reply in ${langMap[lang] || "English"} only. Do not switch languages.`;
+  return `You are ${roleDesc}. ${helpScope}${faqSection} ${langNote} Keep the reply under 300 words. ${redirectHint}`;
+}
+
+// ── Groq text answer ──────────────────────────────────────────────────────────
+async function groqAnswer(question, industry = "", businessName = "", faqContext = "", lang = "english") {
   if (!GROQ_API_KEY) return null;
   const https = require("https");
   return new Promise((resolve) => {
-    const ind = (industry || "").toLowerCase();
-    let roleDesc, helpScope, redirectHint;
-    if (ind.includes("education")) {
-      roleDesc    = `a helpful teaching assistant for ${businessName || "a coaching institute"}`;
-      helpScope   = "Answer academic doubts, explain concepts, solve problems, and help students understand topics.";
-      redirectHint = "If the question is not academic or course-related, politely ask them to contact the teacher directly.";
-    } else if (ind.includes("cloth") || ind.includes("fashion") || ind.includes("apparel")) {
-      roleDesc    = `a knowledgeable shopping assistant for ${businessName || "a clothing store"}`;
-      helpScope   = "Help with fabric/material info, sizing guidance, outfit suggestions, care instructions, and fashion advice.";
-      redirectHint = "If you cannot answer (e.g. stock availability, specific prices), ask them to contact the store directly.";
-    } else if (ind.includes("kirana") || ind.includes("grocery") || ind.includes("food") || ind.includes("supermart")) {
-      roleDesc    = `a helpful store assistant for ${businessName || "a grocery store"}`;
-      helpScope   = "Help with product info, ingredient questions, storage tips, recipe ideas, and general grocery queries.";
-      redirectHint = "If you cannot answer (e.g. exact availability or pricing), ask them to contact the store directly.";
-    } else if (ind.includes("tourism") || ind.includes("travel") || ind.includes("tour")) {
-      roleDesc    = `a knowledgeable travel assistant for ${businessName || "a travel agency"}`;
-      helpScope   = "Help with destination info, travel tips, visa questions, packing advice, and general itinerary guidance.";
-      redirectHint = "If you cannot answer (e.g. specific package prices or availability), ask them to contact the agency directly.";
-    } else if (ind.includes("restaurant") || ind.includes("cafe") || ind.includes("hotel") || ind.includes("food")) {
-      roleDesc    = `a helpful assistant for ${businessName || "a restaurant"}`;
-      helpScope   = "Help with menu questions, ingredient/allergen info, cuisine explanations, and dining suggestions.";
-      redirectHint = "If you cannot answer (e.g. table availability or specific pricing), ask them to contact the restaurant directly.";
-    } else {
-      roleDesc    = `a helpful customer service assistant for ${businessName || "a business"}`;
-      helpScope   = "Answer general customer queries, provide helpful information, and assist with common questions.";
-      redirectHint = "If you cannot confidently answer, politely ask them to contact the business directly.";
-    }
-    const faqSection = faqContext
-      ? `\n\nHere are some FAQs about this business — use them to answer if relevant:\n${faqContext}`
-      : "";
-    const systemPrompt =
-      `You are ${roleDesc}. ${helpScope}${faqSection}` +
-      ` Reply clearly and concisely in the same language the customer used (Hindi/English/Hinglish).` +
-      ` Keep the reply under 300 words. ${redirectHint}`;
+    const systemPrompt = _groqSystemPrompt(industry, businessName, faqContext, lang);
     const body = JSON.stringify({
-      model   : "llama-3.1-8b-instant",
-      messages: [
-        { role: "system",    content: systemPrompt },
-        { role: "user",      content: question },
+      model      : "llama-3.1-8b-instant",
+      messages   : [
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: question },
       ],
-      max_tokens  : 512,
-      temperature : 0.4,
+      max_tokens : 512,
+      temperature: 0.4,
     });
     const req = https.request({
       hostname: "api.groq.com",
       path    : "/openai/v1/chat/completions",
       method  : "POST",
-      headers : {
-        "Authorization": `Bearer ${GROQ_API_KEY}`,
-        "Content-Type" : "application/json",
-        "Content-Length": Buffer.byteLength(body),
-      },
+      headers : { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
     }, (res) => {
       let data = "";
       res.on("data", c => data += c);
@@ -104,10 +106,48 @@ async function groqAnswer(question, industry = "", businessName = "", faqContext
         try {
           const parsed = JSON.parse(data);
           if (parsed.error) console.error("[Groq] API error:", JSON.stringify(parsed.error));
-          const answer = parsed.choices?.[0]?.message?.content?.trim() || null;
-          if (!answer) console.log("[Groq] Raw response:", data.slice(0, 300));
-          resolve(answer);
-        } catch (e) { console.error("[Groq] Parse error:", e.message, data.slice(0,200)); resolve(null); }
+          resolve(parsed.choices?.[0]?.message?.content?.trim() || null);
+        } catch (e) { console.error("[Groq] Parse error:", e.message); resolve(null); }
+      });
+    });
+    req.on("error", () => resolve(null));
+    req.write(body);
+    req.end();
+  });
+}
+
+// ── Groq vision answer (photo of question/problem) ────────────────────────────
+async function groqVisionAnswer(imageUrl, industry = "", businessName = "", lang = "english") {
+  if (!GROQ_API_KEY) return null;
+  const https = require("https");
+  return new Promise((resolve) => {
+    const systemPrompt = _groqSystemPrompt(industry, businessName, "", lang);
+    const body = JSON.stringify({
+      model      : "meta-llama/llama-4-scout-17b-16e-instruct",
+      messages   : [{
+        role   : "user",
+        content: [
+          { type: "image_url", image_url: { url: imageUrl } },
+          { type: "text",      text: "Please read this image carefully and help me with it. If it's a question or problem, solve/explain it. If it's text, read and respond to it." },
+        ],
+      }],
+      max_tokens : 600,
+      temperature: 0.4,
+    });
+    const req = https.request({
+      hostname: "api.groq.com",
+      path    : "/openai/v1/chat/completions",
+      method  : "POST",
+      headers : { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+    }, (res) => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.error) console.error("[Groq Vision] API error:", JSON.stringify(parsed.error));
+          resolve(parsed.choices?.[0]?.message?.content?.trim() || null);
+        } catch (e) { console.error("[Groq Vision] Parse error:", e.message); resolve(null); }
       });
     });
     req.on("error", () => resolve(null));
@@ -791,7 +831,7 @@ async function handleSearch(customerId, sess, message, name) {
   if (isDoubtMsg && GROQ_API_KEY) {
     try {
       console.log(`[Groq] Attempting answer for: "${message.slice(0,80)}"`);
-      const aiAnswer = await groqAnswer(message, qIndustry0, qSettings0.business_name || "", qSettings0.faq_text || "");
+      const aiAnswer = await groqAnswer(message, qIndustry0, qSettings0.business_name || "", qSettings0.faq_text || "", lang);
       if (aiAnswer) {
         console.log(`[Groq] Got answer (${aiAnswer.length} chars)`);
         const aiPrefix = {
@@ -816,7 +856,7 @@ async function handleSearch(customerId, sess, message, name) {
     const qIndustry = qSettings.industry || "";
     if (GROQ_API_KEY) {
       try {
-        const aiAnswer = await groqAnswer(message, qIndustry, qSettings.business_name || "", qSettings.faq_text || "");
+        const aiAnswer = await groqAnswer(message, qIndustry, qSettings.business_name || "", qSettings.faq_text || "", lang);
         if (aiAnswer) {
           const aiPrefix = {
             hindi   : "🤖 *AI Assistant:*\n\n",
@@ -1960,7 +2000,30 @@ async function handleReferralCode(customerId) {
 
 // ── Photo Search — customer sends image → try catalog match → inquiry if none ──
 async function handlePhotoSearch(customerId, sess, imageUrl, name) {
-  const lang = sess.lang || "english";
+  const lang    = sess.lang || "english";
+  const bizId   = sess.businessId || DEFAULT_BUSINESS_ID;
+  const phSettings = await getSettings(bizId);
+  const phIndustry = (phSettings.industry || "").toLowerCase();
+
+  // ── Education: student sent a photo of a question/problem → Groq Vision ──────
+  if (phIndustry.includes("education") && GROQ_API_KEY) {
+    const thinkingMsg = {
+      hindi   : "📸 Aapki photo padh raha hoon, ek second...",
+      hinglish: "📸 Reading your photo, one moment...",
+      english : "📸 Reading your photo, one moment...",
+    };
+    await send(customerId, thinkingMsg[lang] || thinkingMsg.english);
+    try {
+      const visionAnswer = await groqVisionAnswer(imageUrl, phIndustry, phSettings.business_name || "", lang);
+      if (visionAnswer) {
+        await send(customerId, `🤖 *AI Assistant:*\n\n${visionAnswer}`);
+        return;
+      }
+    } catch (ve) {
+      console.error("[Groq Vision] Error:", ve.message);
+    }
+    // fallthrough if vision fails — continue to normal photo inquiry
+  }
 
   const searching = {
     hindi   : "🔍 Aapki photo dekh raha hoon, ek second...",
