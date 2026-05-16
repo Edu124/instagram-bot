@@ -776,6 +776,33 @@ async function handleSearch(customerId, sess, message, name) {
 
   const intent = await ai.extractSearchIntent(message);
 
+  // ── Education / Tourism: detect doubt/question patterns BEFORE product search ──
+  // If the message looks like a subject doubt, FAQ or open question, route to Groq
+  // immediately rather than treating it as a catalog search.
+  const qSettings0  = await getSettings(bizId);
+  const qIndustry0  = (qSettings0.industry || "").toLowerCase();
+  const isDoubtMsg  = /^(explain|what is|what are|how does|how do|why is|why are|define|solve|calculate|difference between|tell me about|describe|meaning of|full form|formula|examples? of|give me|show me|can you|help me|please|iska matlab|matlab|samjhao|samjhaao|batao|kya hai|kaise|kyun)/i.test(message.trim())
+                   || /\?/.test(message);   // any message with a question mark
+  const isEduOrTourism = qIndustry0.includes("education") || qIndustry0.includes("tourism");
+
+  if (isEduOrTourism && isDoubtMsg && GROQ_API_KEY) {
+    try {
+      const aiAnswer = await groqAnswer(message, qIndustry0, qSettings0.business_name || "", qSettings0.faq_text || "");
+      if (aiAnswer) {
+        const aiPrefix = {
+          hindi   : "🤖 *AI Assistant:*\n\n",
+          hinglish: "🤖 *AI Assistant:*\n\n",
+          english : "🤖 *AI Assistant:*\n\n",
+        };
+        await send(customerId, (aiPrefix[lang] || aiPrefix.english) + aiAnswer);
+        return;
+      }
+    } catch (aiErr) {
+      console.error("[Groq] Error:", aiErr.message);
+      // fall through to normal search
+    }
+  }
+
   if (!intent.product) {
 
     // Try Groq AI to answer customer queries before forwarding to owner
