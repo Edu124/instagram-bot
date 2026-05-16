@@ -776,19 +776,21 @@ async function handleSearch(customerId, sess, message, name) {
 
   const intent = await ai.extractSearchIntent(message);
 
-  // ── Education / Tourism: detect doubt/question patterns BEFORE product search ──
-  // If the message looks like a subject doubt, FAQ or open question, route to Groq
-  // immediately rather than treating it as a catalog search.
-  const qSettings0  = await getSettings(bizId);
-  const qIndustry0  = (qSettings0.industry || "").toLowerCase();
-  const isDoubtMsg  = /^(explain|what is|what are|how does|how do|why is|why are|define|solve|calculate|difference between|tell me about|describe|meaning of|full form|formula|examples? of|give me|show me|can you|help me|please|iska matlab|matlab|samjhao|samjhaao|batao|kya hai|kaise|kyun)/i.test(message.trim())
-                   || /\?/.test(message);   // any message with a question mark
-  const isEduOrTourism = qIndustry0.includes("education") || qIndustry0.includes("tourism");
+  // ── Detect doubt/question patterns BEFORE product search ──────────────────────
+  // If the message looks like a question or doubt, try Groq first for ALL industries.
+  const qSettings0 = await getSettings(bizId);
+  const qIndustry0 = (qSettings0.industry || "").toLowerCase();
+  const isDoubtMsg = /^(explain|what is|what are|how does|how do|why is|why are|define|solve|calculate|difference between|tell me about|describe|meaning of|full form|formula|examples? of|give me an example|can you explain|help me understand|iska matlab|matlab|samjhao|samjhaao|batao|kya hai|kaise|kyun)/i.test(message.trim())
+                  || /\?/.test(message); // any message ending with ?
 
-  if (isEduOrTourism && isDoubtMsg && GROQ_API_KEY) {
+  console.log(`[Groq Check] industry="${qIndustry0}" isDoubt=${isDoubtMsg} hasKey=${!!GROQ_API_KEY} msg="${message.slice(0,60)}"`);
+
+  if (isDoubtMsg && GROQ_API_KEY) {
     try {
+      console.log(`[Groq] Attempting answer for: "${message.slice(0,80)}"`);
       const aiAnswer = await groqAnswer(message, qIndustry0, qSettings0.business_name || "", qSettings0.faq_text || "");
       if (aiAnswer) {
+        console.log(`[Groq] Got answer (${aiAnswer.length} chars)`);
         const aiPrefix = {
           hindi   : "🤖 *AI Assistant:*\n\n",
           hinglish: "🤖 *AI Assistant:*\n\n",
@@ -797,6 +799,7 @@ async function handleSearch(customerId, sess, message, name) {
         await send(customerId, (aiPrefix[lang] || aiPrefix.english) + aiAnswer);
         return;
       }
+      console.log(`[Groq] Returned null — falling through`);
     } catch (aiErr) {
       console.error("[Groq] Error:", aiErr.message);
       // fall through to normal search
