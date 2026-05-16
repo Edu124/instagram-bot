@@ -311,6 +311,14 @@ async function routeMessage(customerId, sess, message, name) {
   // ── COD confirmation ──────────────────────────────────────────────────────
   if (state === "choosing_payment") return handlePaymentChoice(customerId, sess, message);
 
+  // ── Kirana industry — route all messages to kirana flow ───────────────────
+  if (!state || state === "idle" || state === "searching" || state?.startsWith("kirana_")) {
+    const kiranaCheck = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
+    if ((kiranaCheck.industry || "").toLowerCase() === "kirana") {
+      return handleKiranaFlow(customerId, sess, message, name);
+    }
+  }
+
   // ── State machine ─────────────────────────────────────────────────────────
   switch (state) {
     case "idle":
@@ -341,10 +349,143 @@ async function routeMessage(customerId, sess, message, name) {
     case "awaiting_payment":
       return handlePaymentCheck(customerId, sess, message);
 
+    case "kirana_collecting_list":
+    case "kirana_collecting_name":
+    case "kirana_collecting_contact":
+    case "kirana_collecting_address":
+      return handleKiranaFlow(customerId, sess, message, name);
+
     default:
       session.reset(customerId);
       return handleSearch(customerId, sess, message, name);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FEATURE: Kirana Grocery Order Flow
+// Customer sends list → name → contact → address → order created + owner notified
+// ─────────────────────────────────────────────────────────────────────────────
+async function handleKiranaFlow(customerId, sess, message, name) {
+  const lang  = sess.lang || "english";
+  const state = sess.state;
+  const bizId = sess.businessId || DEFAULT_BUSINESS_ID;
+
+  // ── Greeting → ask for grocery list ──────────────────────────────────────
+  if (!state || state === "idle" || state === "searching" || GREETINGS.test(message.trim())) {
+    const bizSettings = await getSettings(bizId);
+    const bizName     = bizSettings.business_name || "our store";
+    const customGreeting = (bizSettings.greeting_message || "").trim();
+    if (customGreeting) {
+      await send(customerId, customGreeting.replace(/\{name\}/gi, name).replace(/\{\{name\}\}/gi, name));
+    } else {
+      const greet = {
+        hindi   : `नमस्ते ${name}! 🛒 *${bizName}* में आपका स्वागत है!\n\nअपनी grocery list भेजें — एक line में एक item:\n\nजैसे:\nचावल 1kg\nदाल 500g\nतेल 1L`,
+        hinglish: `Namaste ${name}! 🛒 *${bizName}* mein swagat hai!\n\nApni grocery list bhejo — ek line mein ek item:\n\nExample:\nRice 1kg\nDal 500g\nOil 1L`,
+        english : `Hello ${name}! 🛒 Welcome to *${bizName}*!\n\nSend your grocery list — one item per line:\n\nExample:\nRice 1kg\nDal 500g\nOil 1L`,
+      };
+      await send(customerId, greet[lang] || greet.english);
+    }
+    session.update(customerId, { state: "kirana_collecting_list" });
+    return;
+  }
+
+  // ── Collect grocery list ──────────────────────────────────────────────────
+  if (state === "kirana_collecting_list") {
+    session.update(customerId, { kiranaList: message.trim(), state: "kirana_collecting_name" });
+    const msg = {
+      hindi   : `✅ List note ho gayi!\n\nAb apna *naam* batayein:`,
+      hinglish: `✅ List note ho gayi!\n\nApna *naam* batao:`,
+      english : `✅ Got your list!\n\nPlease share your *name*:`,
+    };
+    return send(customerId, msg[lang] || msg.english);
+  }
+
+  // ── Collect name ──────────────────────────────────────────────────────────
+  if (state === "kirana_collecting_name") {
+    session.update(customerId, { kiranaName: message.trim(), state: "kirana_collecting_contact" });
+    const msg = {
+      hindi   : `📱 Apna *mobile number* dijiye:`,
+      hinglish: `📱 Apna *mobile number* do:`,
+      english : `📱 Please share your *mobile number*:`,
+    };
+    return send(customerId, msg[lang] || msg.english);
+  }
+
+  // ── Collect contact ───────────────────────────────────────────────────────
+  if (state === "kirana_collecting_contact") {
+    const digits = message.replace(/\D/g, "");
+    if (digits.length < 10) {
+      const err = {
+        hindi   : `10 digit valid mobile number enter करें।`,
+        hinglish: `10 digit valid number enter karo.`,
+        english : `Please enter a valid 10-digit mobile number.`,
+      };
+      return send(customerId, err[lang] || err.english);
+    }
+    session.update(customerId, { kiranaMobile: digits.slice(-10), state: "kirana_collecting_address" });
+    const msg = {
+      hindi   : `📍 Delivery *address* batayein:`,
+      hinglish: `📍 Delivery *address* batao:`,
+      english : `📍 Please share your *delivery address*:`,
+    };
+    return send(customerId, msg[lang] || msg.english);
+  }
+
+  // ── Collect address → create order + notify owner ─────────────────────────
+  if (state === "kirana_collecting_address") {
+    const kiranaList   = sess.kiranaList   || "";
+    const kiranaName   = sess.kiranaName   || name;
+    const kiranaMobile = sess.kiranaMobile || "";
+    const address      = message.trim();
+
+    // Parse list into cart items
+    const cart = kiranaList.split("\n")
+      .map(line => line.trim()).filter(Boolean)
+      .map((line, i) => ({ id: `item_${i + 1}`, name: line, qty: 1, price: 0 }));
+
+    const order = await orders.create({
+      customerId,
+      name      : kiranaName,
+      mobile    : kiranaMobile,
+      address,
+      cart,
+      bill      : { subtotal: 0, total: 0 },
+      paymentMode: "cod",
+      status    : "pending_payment",
+    }, bizId);
+
+    // Update customer record
+    await customers.touch(customerId, { name: kiranaName, mobile: kiranaMobile }, bizId);
+
+    // Notify owner on their WhatsApp
+    const bizSettings  = await getSettings(bizId);
+    const ownerNum     = (bizSettings.whatsapp_number || "").replace(/[^0-9]/g, "");
+    if (ownerNum) {
+      const listFormatted = cart.map(i => `• ${i.name}`).join("\n");
+      const custLink      = `https://wa.me/${customerId.replace(/[^0-9]/g, "")}`;
+      const notify =
+        `🛒 *New Grocery Order!*\n\n` +
+        `👤 *Name:* ${kiranaName}\n` +
+        `📱 *Mobile:* ${kiranaMobile}\n` +
+        `📍 *Address:* ${address}\n\n` +
+        `📋 *Items:*\n${listFormatted}\n\n` +
+        `💬 Reply to customer: ${custLink}`;
+      const ctx = _waCtx(customerId);
+      await wa.send(ownerNum, notify, ctx.phoneId, ctx.token);
+    }
+
+    session.reset(customerId);
+    const confirm = {
+      hindi   : `✅ *Order place ho gaya!*\n\nHum aapki list check karke jald hi contact karenge. 😊\n\n*Order ID:* ${order?.id || "N/A"}`,
+      hinglish: `✅ *Order place ho gaya!*\n\nHum list check karke contact karenge. 😊\n\n*Order ID:* ${order?.id || "N/A"}`,
+      english : `✅ *Your order has been placed!*\n\nWe'll review your list and contact you shortly. 😊\n\n*Order ID:* ${order?.id || "N/A"}`,
+    };
+    return send(customerId, confirm[lang] || confirm.english);
+  }
+
+  // Fallback
+  session.update(customerId, { state: "idle" });
+  return handleKiranaFlow(customerId, { ...sess, state: "idle" }, message, name);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
