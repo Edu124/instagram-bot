@@ -217,9 +217,73 @@ function _waCtx(to) {
     token  : s?.waToken || DEFAULT_WA_TOKEN,
   };
 }
-async function send(to, text)                 { const c = _waCtx(to); return wa.send(to, text, c.phoneId, c.token); }
-async function sendCards(to, products)        { const c = _waCtx(to); return wa.sendProductCards(to, products, c.phoneId, c.token); }
-async function sendReplies(to, text, replies) { const c = _waCtx(to); return wa.sendQuickReplies(to, text, replies, c.phoneId, c.token); }
+// ── Instagram send helpers ────────────────────────────────────────────────────
+const INSTAGRAM_PAGE_ID      = process.env.INSTAGRAM_PAGE_ID      || "";
+const INSTAGRAM_ACCESS_TOKEN = process.env.INSTAGRAM_ACCESS_TOKEN || "";
+const INSTAGRAM_BUSINESS_ID  = process.env.INSTAGRAM_BUSINESS_ID  || process.env.BUSINESS_ID || "default";
+
+// Instagram caps messages at 1000 chars — split long messages into chunks
+async function sendInstagramDM(recipientId, text) {
+  if (!INSTAGRAM_PAGE_ID || !INSTAGRAM_ACCESS_TOKEN) {
+    console.warn("[Instagram] Missing PAGE_ID or ACCESS_TOKEN — cannot send");
+    return;
+  }
+  const MAX = 950;
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > MAX) {
+    let cut = remaining.lastIndexOf("\n", MAX);
+    if (cut < 400) cut = MAX;
+    chunks.push(remaining.slice(0, cut).trim());
+    remaining = remaining.slice(cut).trim();
+  }
+  if (remaining) chunks.push(remaining);
+
+  for (const chunk of chunks) {
+    try {
+      const r = await fetch(`https://graph.facebook.com/v19.0/${INSTAGRAM_PAGE_ID}/messages`, {
+        method : "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${INSTAGRAM_ACCESS_TOKEN}` },
+        body   : JSON.stringify({
+          recipient      : { id: recipientId },
+          message        : { text: chunk },
+          messaging_type : "RESPONSE",
+        }),
+      });
+      const d = await r.json();
+      if (d.error) console.error("[Instagram] Send error:", d.error.message);
+    } catch (e) {
+      console.error("[Instagram] Send failed:", e.message);
+    }
+  }
+}
+
+function _isInstagram(to) { return session.get(to)?.channel === "instagram"; }
+
+async function send(to, text) {
+  if (_isInstagram(to)) return sendInstagramDM(to, text);
+  const c = _waCtx(to); return wa.send(to, text, c.phoneId, c.token);
+}
+async function sendCards(to, products) {
+  if (_isInstagram(to)) {
+    // Instagram: convert product cards to a numbered text list
+    const lines = products.map((p, i) =>
+      `${i + 1}. *${p.name}* — ₹${p.price}` +
+      (p.product_number ? ` [${p.product_number}]` : "") +
+      (!p.in_stock ? " _(Out of stock)_" : "")
+    ).join("\n");
+    return sendInstagramDM(to, lines);
+  }
+  const c = _waCtx(to); return wa.sendProductCards(to, products, c.phoneId, c.token);
+}
+async function sendReplies(to, text, replies) {
+  if (_isInstagram(to)) {
+    // Instagram: show options as numbered text
+    const options = replies.map((r, i) => `${i + 1}. ${r}`).join("\n");
+    return sendInstagramDM(to, `${text}\n\n${options}`);
+  }
+  const c = _waCtx(to); return wa.sendQuickReplies(to, text, replies, c.phoneId, c.token);
+}
 
 const DEFAULT_BUSINESS_ID = process.env.BUSINESS_ID || "default";
 
@@ -430,7 +494,83 @@ app.get("/webhook/instagram", (req, res) => {
   if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
   return res.sendStatus(403);
 });
-app.post("/webhook/instagram", (req, res) => res.sendStatus(200)); // no-op for now
+app.post("/webhook/instagram", async (req, res) => {
+  res.sendStatus(200); // respond immediately so Meta doesn't retry
+
+  try {
+    const body = req.body;
+    if (body.object !== "instagram") return;
+
+    for (const entry of (body.entry || [])) {
+      for (const event of (entry.messaging || [])) {
+        // Skip messages sent by the page itself (echoes)
+        if (event.message?.is_echo) continue;
+        if (!event.message) continue;
+
+        const senderId  = event.sender.id;
+        const text      = event.message.text || "";
+        const attachments = event.message.attachments || [];
+
+        // ── Create / update session with Instagram context ─────────────────
+        let sess = session.get(senderId) ||
+          session.create(senderId, { name: "Customer", first_name: "Customer", last_name: "" });
+        session.update(senderId, { businessId: INSTAGRAM_BUSINESS_ID, channel: "instagram" });
+        sess = session.get(senderId);
+
+        // ── Try to fetch sender name from Instagram Graph API ──────────────
+        let name = sess.name || "Customer";
+        try {
+          const r = await fetch(
+            `https://graph.facebook.com/v19.0/${senderId}?fields=name&access_token=${INSTAGRAM_ACCESS_TOKEN}`
+          );
+          const d = await r.json();
+          if (d.name) {
+            name = d.name;
+            session.update(senderId, {
+              name,
+              first_name: d.name.split(" ")[0],
+              last_name : d.name.split(" ").slice(1).join(" "),
+            });
+            sess = session.get(senderId);
+          }
+        } catch (_) {}
+
+        // ── Image / attachment ─────────────────────────────────────────────
+        if (attachments.length > 0 && !text) {
+          const lang = sess.lang || "english";
+          const msg  = {
+            hindi   : `📸 Image देखी! Search के लिए कोई keyword type करें 🔍`,
+            hinglish: `📸 Image dekhi! Koi product name ya keyword type karo 🔍`,
+            english : `📸 Got your image! Type a keyword or product name to search our catalog 🔍`,
+          };
+          await sendInstagramDM(senderId, msg[lang] || msg.english);
+          continue;
+        }
+
+        if (!text) continue;
+
+        console.log(`[Instagram] ${senderId} (${name}): ${text.slice(0, 80)}`);
+
+        // ── Language detection ─────────────────────────────────────────────
+        const requestedLang = language.getRequestedLanguage(text);
+        if (requestedLang) {
+          session.update(senderId, { lang: requestedLang });
+          sess = session.get(senderId);
+          await sendInstagramDM(senderId,
+            `✅ Language changed to ${language.LANGUAGES[requestedLang]?.name || requestedLang}! 🌐`
+          );
+        } else if (!sess.lang) {
+          session.update(senderId, { lang: language.detectLanguage(text) });
+          sess = session.get(senderId);
+        }
+
+        await routeMessage(senderId, sess, text, name);
+      }
+    }
+  } catch (err) {
+    console.error("[Instagram Webhook Error]", err.message);
+  }
+});
 
 // ── ManyChat webhook (legacy — no-op) ─────────────────────────────────────────
 app.get("/webhook/manychat",  (req, res) => res.sendStatus(200));
