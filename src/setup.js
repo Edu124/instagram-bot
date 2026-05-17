@@ -80,7 +80,7 @@ async function setup() {
   await db.query(`CREATE INDEX IF NOT EXISTS customers_ref_idx ON bot_customers(referral_code)`);
   // Add batch column for education class grouping (migration for existing tables)
   await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS batch TEXT NOT NULL DEFAULT ''`);
-  await db.query(`CREATE INDEX IF NOT EXISTS customers_batch_idx ON bot_customers(business_id, batch)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS customers_batch_idx ON bot_customers(batch)`);
 
   // ── loyalty_points ────────────────────────────────────────────────────────────
   await db.query(`
