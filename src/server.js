@@ -522,7 +522,7 @@ app.post("/webhook/instagram", async (req, res) => {
         let name = sess.name || "Customer";
         try {
           const r = await fetch(
-            `https://graph.facebook.com/v19.0/${senderId}?fields=name&access_token=${INSTAGRAM_ACCESS_TOKEN}`
+            `https://graph.facebook.com/v19.0/${senderId}?fields=name&access_token=${encodeURIComponent(INSTAGRAM_ACCESS_TOKEN)}`
           );
           const d = await r.json();
           if (d.name) {
@@ -3791,7 +3791,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`[Instagram] Page ID: ${INSTAGRAM_PAGE_ID ? INSTAGRAM_PAGE_ID : "NOT SET"}`);
   console.log(`[Instagram] Token: ${INSTAGRAM_ACCESS_TOKEN ? INSTAGRAM_ACCESS_TOKEN.slice(0, 10) + "..." : "NOT SET"}`);
   if (INSTAGRAM_ACCESS_TOKEN) {
-    fetch(`https://graph.facebook.com/v19.0/me?fields=id,name&access_token=${INSTAGRAM_ACCESS_TOKEN}`)
+    fetch(`https://graph.facebook.com/v19.0/me?fields=id,name&access_token=${encodeURIComponent(INSTAGRAM_ACCESS_TOKEN)}`)
       .then(r => r.json())
       .then(d => {
         if (d.error) console.error(`[Instagram] Token invalid: ${d.error.message}`);
