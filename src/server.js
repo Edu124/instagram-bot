@@ -243,11 +243,12 @@ async function sendInstagramDM(recipientId, text) {
     try {
       const r = await fetch(`https://graph.facebook.com/v19.0/${INSTAGRAM_PAGE_ID}/messages`, {
         method : "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${INSTAGRAM_ACCESS_TOKEN}` },
+        headers: { "Content-Type": "application/json" },
         body   : JSON.stringify({
           recipient      : { id: recipientId },
           message        : { text: chunk },
           messaging_type : "RESPONSE",
+          access_token   : INSTAGRAM_ACCESS_TOKEN,
         }),
       });
       const d = await r.json();
@@ -3789,6 +3790,15 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`[Selly Bot] Features: multi-language · status-reply · loyalty · bargaining · festivals · COD+Razorpay`);
   console.log(`[Instagram] Page ID: ${INSTAGRAM_PAGE_ID ? INSTAGRAM_PAGE_ID : "NOT SET"}`);
   console.log(`[Instagram] Token: ${INSTAGRAM_ACCESS_TOKEN ? INSTAGRAM_ACCESS_TOKEN.slice(0, 10) + "..." : "NOT SET"}`);
+  if (INSTAGRAM_ACCESS_TOKEN) {
+    fetch(`https://graph.facebook.com/v19.0/me?fields=id,name&access_token=${INSTAGRAM_ACCESS_TOKEN}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) console.error(`[Instagram] Token invalid: ${d.error.message}`);
+        else console.log(`[Instagram] Token valid ✓ — account: ${d.name} (${d.id})`);
+      })
+      .catch(() => {});
+  }
 });
 
 // DB setup with auto-retry — if DB is slow to start, retry every 5s
