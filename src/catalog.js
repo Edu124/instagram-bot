@@ -208,6 +208,8 @@ function _toProduct(row) {
     rating       : row.rating != null ? Number(row.rating) : null,
     inStock      : row.in_stock,
     tags         : row.tags         || [],
+    productNumber: row.product_number || "",
+    stockCount   : row.stock_count != null ? Number(row.stock_count) : -1,
     createdAt    : row.created_at ? new Date(row.created_at).getTime() : Date.now(),
   };
 }

@@ -290,11 +290,17 @@ async function setup() {
   await db.query(`CREATE INDEX IF NOT EXISTS wa_numbers_bid_idx ON whatsapp_numbers(business_id)`);
 
   // ── Column migrations (safe on existing Railway PG DBs) ──────────────────────
-  // NOTE: Also run these in Supabase SQL editor:
-  //   ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS faq_text TEXT NOT NULL DEFAULT '';
-  //   ALTER TABLE catalog ADD COLUMN IF NOT EXISTS stock_count INTEGER NOT NULL DEFAULT -1;
-  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS faq_text TEXT NOT NULL DEFAULT ''`);
-  await db.query(`ALTER TABLE catalog            ADD COLUMN IF NOT EXISTS stock_count INTEGER NOT NULL DEFAULT -1`);
+  // NOTE: Also run these in Supabase SQL editor (business_settings is authoritative there):
+  //   ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS faq_text         TEXT NOT NULL DEFAULT '';
+  //   ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS business_slug    TEXT NOT NULL DEFAULT '';
+  //   ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS instagram_handle TEXT NOT NULL DEFAULT '';
+  //   ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS city             TEXT NOT NULL DEFAULT '';
+  //   ALTER TABLE catalog           ADD COLUMN IF NOT EXISTS stock_count      INTEGER NOT NULL DEFAULT -1;
+  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS faq_text         TEXT NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS business_slug    TEXT NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS instagram_handle TEXT NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS city             TEXT NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE catalog            ADD COLUMN IF NOT EXISTS stock_count     INTEGER NOT NULL DEFAULT -1`);
 
   console.log("[Setup] All tables ready ✓");
 }

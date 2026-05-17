@@ -243,7 +243,10 @@ function _toCustomer(row) {
 async function bulkImport(contacts, businessId = DEFAULT_BID) {
   const rows = contacts
     .map(({ name, phone }) => {
-      const id = (phone || "").replace(/[^0-9]/g, "");
+      const digits = (phone || "").replace(/[^0-9]/g, "");
+      // Normalise to WhatsApp ID format: Indian 10-digit numbers get 91 prefix
+      // so imported contacts match the IDs the bot assigns when they message in.
+      const id = digits.length === 10 ? "91" + digits : digits;
       if (id.length < 10) return null;
       return {
         id,

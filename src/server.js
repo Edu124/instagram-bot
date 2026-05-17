@@ -2939,6 +2939,7 @@ app.post("/api/settings", async (req, res) => {
     "upi_id","bank_details",          // online payment details
     "greeting_message","location_url", // bot customisation
     "faq_text",                        // AI FAQ context
+    "instagram_handle","city",         // shop page / AI discovery
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {
@@ -2946,19 +2947,115 @@ app.post("/api/settings", async (req, res) => {
   }
   if (Object.keys(updates).length <= 2) return res.status(400).json({ error: "No fields to update" });
 
+  // Auto-generate business_slug if not already set
+  try {
+    const existing = await getSettings(bid);
+    if (!existing.business_slug) {
+      const name = (updates.business_name || existing.business_name || "shop").toLowerCase();
+      const city = (updates.city || existing.city || "").toLowerCase();
+      const base = (name + (city ? "-" + city : "") + "-" + bid.slice(0, 6))
+        .replace(/[^a-z0-9\s-]/g, "").replace(/\s+/g, "-").replace(/-+/g, "-").slice(0, 60);
+      updates.business_slug = base;
+    }
+  } catch (_) {}
+
   try {
     if (!supabaseAdmin) return res.status(503).json({ error: "Supabase not configured" });
+    const isNewSlug = !!updates.business_slug;
     const { error } = await supabaseAdmin
       .from("business_settings")
       .upsert(updates, { onConflict: "business_id" });
     if (error) throw new Error(error.message);
     delete _settingsCache[bid];     // invalidate cache immediately
     delete _settingsCacheTime[bid];
+    // Ping Google sitemap when a new shop page is created
+    if (isNewSlug) {
+      const https = require("https");
+      const sitemapUrl = encodeURIComponent("https://selly.in/sitemap.xml");
+      https.get(`https://www.google.com/ping?sitemap=${sitemapUrl}`, () => {}).on("error", () => {});
+    }
     const s = await getSettings(bid);
     res.json({ ok: true, settings: s });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC SHOP PAGES — no auth required, safe fields only
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /public/shop/:slug — single business public profile
+app.get("/public/shop/:slug", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    if (!supabaseAdmin) return res.status(503).json({ error: "Not configured" });
+    const { data, error } = await supabaseAdmin
+      .from("business_settings")
+      .select("business_id,business_name,industry,city,instagram_handle,whatsapp_number,business_address,business_slug")
+      .eq("business_slug", req.params.slug)
+      .maybeSingle();
+    if (error || !data) return res.status(404).json({ error: "Shop not found" });
+
+    // Fetch top 8 in-stock products from catalog
+    const { data: products } = await supabaseAdmin
+      .from("catalog")
+      .select("id,name,price,image_url,category,description")
+      .eq("business_id", data.business_id)
+      .eq("in_stock", true)
+      .order("created_at", { ascending: false })
+      .limit(8);
+
+    res.json({
+      business_name    : data.business_name,
+      industry         : data.industry,
+      city             : data.city,
+      instagram_handle : data.instagram_handle,
+      whatsapp_number  : data.whatsapp_number,
+      business_address : data.business_address,
+      slug             : data.business_slug,
+      products         : (products || []).map(p => ({
+        id: p.id, name: p.name, price: p.price,
+        image_url: p.image_url, category: p.category, description: p.description,
+      })),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /public/shops — all active businesses for directory page
+app.get("/public/shops", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    if (!supabaseAdmin) return res.status(503).json({ error: "Not configured" });
+    const { data } = await supabaseAdmin
+      .from("business_settings")
+      .select("business_name,industry,city,instagram_handle,whatsapp_number,business_slug")
+      .neq("business_slug", "")
+      .order("updated_at", { ascending: false })
+      .limit(200);
+    res.json({ shops: (data || []).filter(s => s.business_slug) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /public/sitemap.xml — for Google/Bing submission
+app.get("/public/sitemap.xml", async (req, res) => {
+  try {
+    if (!supabaseAdmin) return res.status(503).send("");
+    const { data } = await supabaseAdmin
+      .from("business_settings")
+      .select("business_slug,updated_at")
+      .neq("business_slug", "");
+    const urls = (data || []).filter(s => s.business_slug).map(s =>
+      `  <url><loc>https://selly.in/shop/${s.business_slug}</loc><lastmod>${(s.updated_at || "").slice(0,10)}</lastmod></url>`
+    ).join("\n");
+    res.setHeader("Content-Type", "application/xml");
+    res.send(`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://selly.in/</loc></url>
+  <url><loc>https://selly.in/shops</loc></url>
+${urls}
+</urlset>`);
+  } catch (e) { res.status(500).send(""); }
 });
 
 // DELETE /api/settings/cache — called by app after direct Supabase save to bust server cache
