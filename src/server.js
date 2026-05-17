@@ -2971,7 +2971,7 @@ app.post("/api/settings", async (req, res) => {
     // Ping Google sitemap when a new shop page is created
     if (isNewSlug) {
       const https = require("https");
-      const sitemapUrl = encodeURIComponent("https://selly.in/sitemap.xml");
+      const sitemapUrl = encodeURIComponent("https://selly.codeforgeai.app/sitemap.xml");
       https.get(`https://www.google.com/ping?sitemap=${sitemapUrl}`, () => {}).on("error", () => {});
     }
     const s = await getSettings(bid);
@@ -3046,13 +3046,13 @@ app.get("/public/sitemap.xml", async (req, res) => {
       .select("business_slug,updated_at")
       .neq("business_slug", "");
     const urls = (data || []).filter(s => s.business_slug).map(s =>
-      `  <url><loc>https://selly.in/shop/${s.business_slug}</loc><lastmod>${(s.updated_at || "").slice(0,10)}</lastmod></url>`
+      `  <url><loc>https://selly.codeforgeai.app/shop/${s.business_slug}</loc><lastmod>${(s.updated_at || "").slice(0,10)}</lastmod></url>`
     ).join("\n");
     res.setHeader("Content-Type", "application/xml");
     res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://selly.in/</loc></url>
-  <url><loc>https://selly.in/shops</loc></url>
+  <url><loc>https://selly.codeforgeai.app/</loc></url>
+  <url><loc>https://selly.codeforgeai.app/shops</loc></url>
 ${urls}
 </urlset>`);
   } catch (e) { res.status(500).send(""); }
