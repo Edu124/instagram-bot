@@ -218,9 +218,9 @@ function _waCtx(to) {
   };
 }
 // ── Instagram send helpers ────────────────────────────────────────────────────
-const INSTAGRAM_PAGE_ID      = process.env.INSTAGRAM_PAGE_ID      || "";
-const INSTAGRAM_ACCESS_TOKEN = process.env.INSTAGRAM_ACCESS_TOKEN || "";
-const INSTAGRAM_BUSINESS_ID  = process.env.INSTAGRAM_BUSINESS_ID  || process.env.BUSINESS_ID || "default";
+const INSTAGRAM_PAGE_ID      = (process.env.INSTAGRAM_PAGE_ID      || "").trim();
+const INSTAGRAM_ACCESS_TOKEN = (process.env.INSTAGRAM_ACCESS_TOKEN || "").trim();
+const INSTAGRAM_BUSINESS_ID  = (process.env.INSTAGRAM_BUSINESS_ID  || process.env.BUSINESS_ID || "default").trim();
 
 // Instagram caps messages at 1000 chars — split long messages into chunks
 async function sendInstagramDM(recipientId, text) {
@@ -3787,6 +3787,8 @@ process.on("SIGTERM", () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[Selly Bot] Running on port ${PORT} 🚀`);
   console.log(`[Selly Bot] Features: multi-language · status-reply · loyalty · bargaining · festivals · COD+Razorpay`);
+  console.log(`[Instagram] Page ID: ${INSTAGRAM_PAGE_ID ? INSTAGRAM_PAGE_ID : "NOT SET"}`);
+  console.log(`[Instagram] Token: ${INSTAGRAM_ACCESS_TOKEN ? INSTAGRAM_ACCESS_TOKEN.slice(0, 10) + "..." : "NOT SET"}`);
 });
 
 // DB setup with auto-retry — if DB is slow to start, retry every 5s
