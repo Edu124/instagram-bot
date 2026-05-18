@@ -307,6 +307,26 @@ async function setup() {
   await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS instagram_access_token  TEXT    NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS instagram_account_id    TEXT    NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS expo_push_token         TEXT    NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS return_policy            TEXT    NOT NULL DEFAULT ''`);
+
+  // ── return_requests ───────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS return_requests (
+      id             TEXT PRIMARY KEY,
+      business_id    TEXT NOT NULL DEFAULT 'default',
+      order_id       TEXT NOT NULL DEFAULT '',
+      customer_email TEXT NOT NULL DEFAULT '',
+      customer_name  TEXT NOT NULL DEFAULT '',
+      reason         TEXT NOT NULL DEFAULT '',
+      description    TEXT NOT NULL DEFAULT '',
+      status         TEXT NOT NULL DEFAULT 'pending',
+      owner_note     TEXT NOT NULL DEFAULT '',
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS returns_bid_idx    ON return_requests(business_id)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS returns_status_idx ON return_requests(status)`);
 
   // ── web_otps ──────────────────────────────────────────────────────────────────
   await db.query(`

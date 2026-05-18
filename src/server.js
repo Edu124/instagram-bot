@@ -3119,6 +3119,7 @@ app.post("/api/settings", async (req, res) => {
     "bot_whatsapp",                    // customer-facing bot WhatsApp (shown on shop page)
     "whatsapp_enabled","instagram_enabled", // channel toggles
     "instagram_access_token","instagram_account_id", // per-business Instagram credentials
+    "return_policy",                                  // customer-facing return / refund policy
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {
@@ -3171,7 +3172,7 @@ app.get("/public/shop/:slug", async (req, res) => {
     if (!supabaseAdmin) return res.status(503).json({ error: "Not configured" });
     const { data, error } = await supabaseAdmin
       .from("business_settings")
-      .select("business_id,business_name,industry,city,instagram_handle,whatsapp_number,bot_whatsapp,whatsapp_enabled,instagram_enabled,business_address,business_slug,gst_enabled,gst_rate,delivery_charge,free_above,cod_fee")
+      .select("business_id,business_name,industry,city,instagram_handle,whatsapp_number,bot_whatsapp,whatsapp_enabled,instagram_enabled,business_address,business_slug,gst_enabled,gst_rate,delivery_charge,free_above,cod_fee,return_policy")
       .eq("business_slug", req.params.slug)
       .maybeSingle();
     if (error || !data) return res.status(404).json({ error: "Shop not found" });
@@ -3201,6 +3202,7 @@ app.get("/public/shop/:slug", async (req, res) => {
       free_above        : data.free_above    || 0,
       cod_fee           : data.cod_fee       || 0,
       slug             : data.business_slug,
+      return_policy    : data.return_policy || "",
       products         : (products || []).map(p => ({
         id: p.id, name: p.name, price: p.price,
         image_url: p.image_url, category: p.category, description: p.description,
@@ -3355,6 +3357,83 @@ app.post("/api/web/order", async (req, res) => {
     console.error("[WebOrder]", e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// POST /api/web/return — customer submits a return / refund / complaint request
+// Public endpoint — no auth needed. Owner reviews and approves/rejects in app.
+app.post("/api/web/return", async (req, res) => {
+  const { bid, order_id, customer_email, customer_name, reason, description } = req.body || {};
+  if (!bid || !order_id || !reason)
+    return res.status(400).json({ error: "bid, order_id, and reason are required" });
+
+  try {
+    const rid = "RET" + Date.now().toString(36).toUpperCase();
+    await db.query(
+      `INSERT INTO return_requests
+         (id, business_id, order_id, customer_email, customer_name, reason, description, status, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',NOW(),NOW())`,
+      [rid, bid, order_id.trim(), (customer_email || "").trim(),
+       (customer_name || "").trim(), reason.trim(), (description || "").trim()]
+    );
+
+    // Notify owner via push + WhatsApp
+    try {
+      const settings = await getSettings(bid);
+      const pushToken = settings.expo_push_token;
+      if (pushToken) {
+        await sendExpoPush(
+          pushToken,
+          `↩ Return request — Order #${order_id}`,
+          `${customer_name || "Customer"}: ${reason}`,
+          { returnId: rid, screen: "Returns" }
+        );
+      }
+      const ownNum = settings.whatsapp_number?.replace(/\D/g, "");
+      if (ownNum) {
+        const c = _waCtx("owner");
+        await wa.send(ownNum, `↩ *Return Request #${rid}*\n📦 Order: ${order_id}\n👤 ${customer_name || "Customer"} (${customer_email || "no email"})\n❓ ${reason}\n📝 ${description || "—"}`, c.phoneId, c.token);
+      }
+    } catch (_) {}
+
+    res.json({ ok: true, return_id: rid });
+  } catch (e) {
+    console.error("[WebReturn]", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/returns — owner views all return requests for their business
+app.get("/api/returns", async (req, res) => {
+  const bid    = req.query.bid || req.headers["x-business-id"];
+  const status = req.query.status; // optional filter
+  if (!bid) return res.status(400).json({ error: "bid required" });
+  try {
+    let q = `SELECT * FROM return_requests WHERE business_id=$1`;
+    const params = [bid];
+    if (status) { q += ` AND status=$2`; params.push(status); }
+    q += ` ORDER BY created_at DESC LIMIT 100`;
+    const { rows } = await db.query(q, params);
+    res.json({ returns: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// PATCH /api/returns/:id — owner approves or rejects a return request
+app.patch("/api/returns/:id", async (req, res) => {
+  const bid    = req.query.bid || req.headers["x-business-id"];
+  const { status, owner_note } = req.body || {};
+  if (!["approved", "rejected"].includes(status))
+    return res.status(400).json({ error: "status must be approved or rejected" });
+  try {
+    const { rows } = await db.query(
+      `UPDATE return_requests
+         SET status=$1, owner_note=$2, updated_at=NOW()
+       WHERE id=$3 AND business_id=$4
+       RETURNING *`,
+      [status, owner_note || "", req.params.id, bid]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+    res.json({ ok: true, return: rows[0] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // POST /api/owner/push-token — save Expo push token for the business owner
