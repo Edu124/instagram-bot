@@ -692,10 +692,17 @@ async function routeMessage(customerId, sess, message, name) {
     const rating = parseInt(message.trim(), 10);
     try {
       const rid = Date.now().toString() + Math.random().toString(36).slice(2, 6);
+      // Fetch first product name from the order for per-product review display
+      let productName = "";
+      try {
+        const oRes = await db.query(`SELECT cart FROM orders WHERE id=$1 LIMIT 1`, [sess.awaitingReview]);
+        const cart = oRes.rows[0]?.cart || [];
+        if (cart.length > 0) productName = cart[0].name || "";
+      } catch (_) {}
       await db.query(
-        `INSERT INTO order_reviews (id, business_id, customer_id, customer_name, order_id, rating)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [rid, bizId, customerId, name, sess.awaitingReview, rating]
+        `INSERT INTO order_reviews (id, business_id, customer_id, customer_name, order_id, rating, product_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [rid, bizId, customerId, name, sess.awaitingReview, rating, productName]
       );
     } catch (_) {}
     session.update(customerId, { awaitingReview: null });
@@ -3209,9 +3216,33 @@ app.get("/public/shop/:slug", async (req, res) => {
         in_stock: p.in_stock, colors: p.colors || [], sizes: p.sizes || [],
         has_sizes: p.has_sizes || false, material: p.material || "",
         product_number: p.product_number || "",
+        image_urls: p.image_urls || (p.image_url ? [p.image_url] : []),
       })),
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /public/shop/:slug/reviews — customer reviews for shop page
+app.get("/public/shop/:slug/reviews", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    if (!supabaseAdmin) return res.json({ reviews: [], average: null, total: 0 });
+    const { data: biz } = await supabaseAdmin
+      .from("business_settings")
+      .select("business_id")
+      .eq("business_slug", req.params.slug)
+      .maybeSingle();
+    if (!biz) return res.json({ reviews: [], average: null, total: 0 });
+    const { rows } = await db.query(
+      `SELECT id, customer_name, rating, product_name, created_at
+       FROM order_reviews WHERE business_id=$1 ORDER BY created_at DESC LIMIT 50`,
+      [biz.business_id]
+    );
+    const avg = rows.length
+      ? (rows.reduce((s, r) => s + r.rating, 0) / rows.length).toFixed(1)
+      : null;
+    res.json({ reviews: rows, average: avg, total: rows.length });
+  } catch (e) { res.json({ reviews: [], average: null, total: 0 }); }
 });
 
 // GET /public/shop/:slug/reels — recent Instagram posts/reels for shop page
@@ -3432,7 +3463,28 @@ app.patch("/api/returns/:id", async (req, res) => {
       [status, owner_note || "", req.params.id, bid]
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
-    res.json({ ok: true, return: rows[0] });
+    const ret = rows[0];
+
+    // ── Notify customer via WhatsApp ──────────────────────────────────────────
+    try {
+      // Look up customer phone from the linked order
+      const orderRes = await db.query(
+        `SELECT mobile FROM orders WHERE id=$1 LIMIT 1`,
+        [ret.order_id]
+      );
+      const mobile = (orderRes.rows[0]?.mobile || ret.customer_phone || "").replace(/\D/g, "");
+      if (mobile) {
+        const settings = await getSettings(bid);
+        const c = _waCtx(bid);
+        const note = (owner_note || "").trim();
+        const msg = status === "approved"
+          ? `✅ *Return Request Approved*\n\nHi ${ret.customer_name || "there"}! Your return/refund request for Order *#${ret.order_id}* has been *approved*.\n\n${note ? `📝 *Message from seller:* ${note}\n\n` : ""}Our team will contact you with the next steps. Thank you for your patience! 🙏`
+          : `ℹ️ *Return Request Update*\n\nHi ${ret.customer_name || "there"}! We've reviewed your return request for Order *#${ret.order_id}*.\n\n${note ? `📝 *Message from seller:* ${note}\n\n` : ""}If you have any questions, please reach out to us directly.`;
+        await wa.send(mobile, msg, c.phoneId, c.token);
+      }
+    } catch (_) { /* non-fatal — response already sent */ }
+
+    res.json({ ok: true, return: ret });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

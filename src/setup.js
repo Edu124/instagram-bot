@@ -308,6 +308,9 @@ async function setup() {
   await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS instagram_account_id    TEXT    NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS expo_push_token         TEXT    NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS return_policy            TEXT    NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE catalog             ADD COLUMN IF NOT EXISTS image_urls               JSONB   NOT NULL DEFAULT '[]'`);
+  await db.query(`ALTER TABLE order_reviews       ADD COLUMN IF NOT EXISTS product_name             TEXT    NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE return_requests     ADD COLUMN IF NOT EXISTS customer_phone           TEXT    NOT NULL DEFAULT ''`);
 
   // ── return_requests ───────────────────────────────────────────────────────────
   await db.query(`
