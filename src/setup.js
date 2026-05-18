@@ -306,6 +306,7 @@ async function setup() {
   await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS instagram_enabled       BOOLEAN NOT NULL DEFAULT false`);
   await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS instagram_access_token  TEXT    NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS instagram_account_id    TEXT    NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS expo_push_token         TEXT    NOT NULL DEFAULT ''`);
 
   // ── web_otps ──────────────────────────────────────────────────────────────────
   await db.query(`

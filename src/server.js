@@ -227,6 +227,31 @@ async function verifySupabaseToken(accessToken) {
   return data.user;
 }
 
+// ── Expo Push Notifications ───────────────────────────────────────────────────
+// Sends a push notification to the business owner's Selly app via Expo Push API.
+// Token is registered by the app on startup (POST /api/owner/push-token).
+async function sendExpoPush(token, title, body, data = {}) {
+  if (!token || !token.startsWith("ExponentPushToken[")) return;
+  const https = require("https");
+  return new Promise((resolve) => {
+    const payload = JSON.stringify({ to: token, title, body, data, sound: "default", badge: 1, channelId: "orders" });
+    const options = {
+      hostname: "exp.host",
+      path    : "/--/api/v2/push/send",
+      method  : "POST",
+      headers : {
+        "Content-Type"  : "application/json",
+        "Accept"        : "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+      },
+    };
+    const req = https.request(options, (r) => { r.resume(); r.on("end", resolve); });
+    req.on("error", (e) => { console.error("[Push]", e.message); resolve(); });
+    req.write(payload);
+    req.end();
+  });
+}
+
 // ── Instagram send helpers ────────────────────────────────────────────────────
 const INSTAGRAM_PAGE_ID      = (process.env.INSTAGRAM_PAGE_ID      || "").trim();
 const INSTAGRAM_ACCESS_TOKEN = (process.env.INSTAGRAM_ACCESS_TOKEN || "").trim();
@@ -3302,6 +3327,20 @@ app.post("/api/web/order", async (req, res) => {
       if (ownNum) await wa.send(ownNum, ownerMsg, c.phoneId, c.token);
     } catch (_) {}
 
+    // Notify owner via Expo push (Selly app notification)
+    try {
+      const pushToken = settings.expo_push_token;
+      if (pushToken) {
+        const itemSummary = cartItems.map(i => `${i.name}${i.size ? ` (${i.size})` : ""} ×${i.qty}`).join(", ");
+        await sendExpoPush(
+          pushToken,
+          `🛒 New order from ${customer.name}`,
+          `₹${total.toLocaleString("en-IN")} · ${payment_mode.toUpperCase()} · ${itemSummary}`,
+          { orderId, screen: "Orders" }
+        );
+      }
+    } catch (_) {}
+
     // Razorpay link for online payment
     let pay_link = null;
     if (payment_mode === "online") {
@@ -3316,6 +3355,33 @@ app.post("/api/web/order", async (req, res) => {
     console.error("[WebOrder]", e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// POST /api/owner/push-token — save Expo push token for the business owner
+// Called by the Selly app on startup after login to register for push notifications
+app.post("/api/owner/push-token", async (req, res) => {
+  const bid   = req.query.bid || req.headers["x-business-id"] || req.body?.bid;
+  const token = req.body?.token;
+  if (!bid || !token) return res.status(400).json({ error: "bid and token required" });
+  try {
+    if (supabaseAdmin) {
+      await supabaseAdmin
+        .from("business_settings")
+        .upsert({ business_id: bid, expo_push_token: token, updated_at: new Date().toISOString() },
+                 { onConflict: "business_id" });
+    } else {
+      await db.query(
+        `INSERT INTO business_settings (business_id, expo_push_token, updated_at)
+         VALUES ($1,$2,NOW())
+         ON CONFLICT (business_id) DO UPDATE SET expo_push_token=$2, updated_at=NOW()`,
+        [bid, token]
+      );
+    }
+    // Bust settings cache so next request picks up the new token
+    delete _settingsCache[bid];
+    delete _settingsCacheTime[bid];
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET /public/shops — all active businesses for directory page
