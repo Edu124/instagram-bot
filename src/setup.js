@@ -301,7 +301,9 @@ async function setup() {
   await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS instagram_handle TEXT NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS city             TEXT NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE catalog            ADD COLUMN IF NOT EXISTS stock_count     INTEGER NOT NULL DEFAULT -1`);
-  await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS bot_whatsapp    TEXT NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS bot_whatsapp         TEXT    NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS whatsapp_enabled    BOOLEAN NOT NULL DEFAULT false`);
+  await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS instagram_enabled   BOOLEAN NOT NULL DEFAULT false`);
 
   console.log("[Setup] All tables ready ✓");
 }

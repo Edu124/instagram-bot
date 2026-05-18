@@ -3082,6 +3082,7 @@ app.post("/api/settings", async (req, res) => {
     "faq_text",                        // AI FAQ context
     "instagram_handle","city",         // shop page / AI discovery
     "bot_whatsapp",                    // customer-facing bot WhatsApp (shown on shop page)
+    "whatsapp_enabled","instagram_enabled", // channel toggles
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {
@@ -3134,7 +3135,7 @@ app.get("/public/shop/:slug", async (req, res) => {
     if (!supabaseAdmin) return res.status(503).json({ error: "Not configured" });
     const { data, error } = await supabaseAdmin
       .from("business_settings")
-      .select("business_id,business_name,industry,city,instagram_handle,whatsapp_number,bot_whatsapp,business_address,business_slug")
+      .select("business_id,business_name,industry,city,instagram_handle,whatsapp_number,bot_whatsapp,whatsapp_enabled,instagram_enabled,business_address,business_slug")
       .eq("business_slug", req.params.slug)
       .maybeSingle();
     if (error || !data) return res.status(404).json({ error: "Shop not found" });
@@ -3153,8 +3154,10 @@ app.get("/public/shop/:slug", async (req, res) => {
       industry         : data.industry,
       city             : data.city,
       instagram_handle : data.instagram_handle,
-      whatsapp_number  : data.bot_whatsapp || data.whatsapp_number,
-      business_address : data.business_address,
+      whatsapp_number   : data.bot_whatsapp || data.whatsapp_number,
+      whatsapp_enabled  : data.whatsapp_enabled  || false,
+      instagram_enabled : data.instagram_enabled || false,
+      business_address  : data.business_address,
       slug             : data.business_slug,
       products         : (products || []).map(p => ({
         id: p.id, name: p.name, price: p.price,
