@@ -295,7 +295,7 @@ const PORT = process.env.PORT || 3000;
 app.use((req, res, next) => {
   const origin = req.headers.origin || "";
   if (!origin || origin.startsWith("http://localhost") || origin.startsWith("http://127.0.0.1") ||
-      origin.includes("railway.app") || origin.includes("vercel.app")) {
+      origin.includes("railway.app") || origin.includes("vercel.app") || origin.includes("codeforgeai.app")) {
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Business-ID,x-admin-token");
@@ -3138,6 +3138,13 @@ app.get("/public/shop/:slug", async (req, res) => {
       .maybeSingle();
     if (error || !data) return res.status(404).json({ error: "Shop not found" });
 
+    // Fetch bot WhatsApp number from whatsapp_numbers table
+    const { data: waNum } = await db.query(
+      `SELECT phone_number FROM whatsapp_numbers WHERE business_id=$1 AND active=true LIMIT 1`,
+      [data.business_id]
+    ).catch(() => ({ data: null }));
+    const botWhatsapp = (waNum?.rows?.[0]?.phone_number || "").trim();
+
     // Fetch top 8 in-stock products from catalog
     const { data: products } = await supabaseAdmin
       .from("catalog")
@@ -3152,7 +3159,7 @@ app.get("/public/shop/:slug", async (req, res) => {
       industry         : data.industry,
       city             : data.city,
       instagram_handle : data.instagram_handle,
-      whatsapp_number  : data.whatsapp_number,
+      whatsapp_number  : botWhatsapp || data.whatsapp_number,
       business_address : data.business_address,
       slug             : data.business_slug,
       products         : (products || []).map(p => ({
