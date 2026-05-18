@@ -3083,6 +3083,7 @@ app.post("/api/settings", async (req, res) => {
     "instagram_handle","city",         // shop page / AI discovery
     "bot_whatsapp",                    // customer-facing bot WhatsApp (shown on shop page)
     "whatsapp_enabled","instagram_enabled", // channel toggles
+    "instagram_access_token","instagram_account_id", // per-business Instagram credentials
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {
@@ -3164,6 +3165,53 @@ app.get("/public/shop/:slug", async (req, res) => {
         image_url: p.image_url, category: p.category, description: p.description, in_stock: p.in_stock,
       })),
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /public/shop/:slug/reels — recent Instagram posts/reels for shop page
+app.get("/public/shop/:slug/reels", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  try {
+    if (!supabaseAdmin) return res.status(503).json({ error: "Not configured" });
+
+    // Get the business settings to check instagram_enabled + token
+    const { data } = await supabaseAdmin
+      .from("business_settings")
+      .select("business_id,instagram_enabled,instagram_access_token,instagram_account_id")
+      .eq("business_slug", req.params.slug)
+      .maybeSingle();
+
+    if (!data || !data.instagram_enabled) return res.json({ reels: [] });
+
+    // Use per-business token if stored, otherwise fall back to server env token
+    const token     = (data.instagram_access_token || INSTAGRAM_ACCESS_TOKEN || "").trim();
+    const accountId = (data.instagram_account_id   || INSTAGRAM_PAGE_ID      || "").trim();
+
+    if (!token || !accountId) return res.json({ reels: [] });
+
+    const url = `https://graph.facebook.com/v19.0/${accountId}/media` +
+      `?fields=id,media_type,media_url,thumbnail_url,permalink,caption,timestamp` +
+      `&limit=9&access_token=${encodeURIComponent(token)}`;
+
+    const igRes  = await fetch(url);
+    const igData = await igRes.json();
+
+    if (!igRes.ok || igData.error) {
+      console.warn("[Reels] Instagram fetch error:", igData.error?.message);
+      return res.json({ reels: [] });
+    }
+
+    const reels = (igData.data || []).map(m => ({
+      id          : m.id,
+      type        : m.media_type,           // IMAGE, VIDEO, CAROUSEL_ALBUM
+      media_url   : m.media_type === "VIDEO" ? (m.thumbnail_url || "") : (m.media_url || ""),
+      video_url   : m.media_type === "VIDEO" ? (m.media_url || "") : null,
+      permalink   : m.permalink,
+      caption     : (m.caption || "").slice(0, 120),
+      timestamp   : m.timestamp,
+    }));
+
+    res.json({ reels });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
