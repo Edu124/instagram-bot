@@ -3142,7 +3142,7 @@ app.get("/public/shop/:slug", async (req, res) => {
     // Fetch top 8 in-stock products from catalog
     const { data: products } = await supabaseAdmin
       .from("catalog")
-      .select("id,name,price,image_url,category,description")
+      .select("id,name,price,image_url,category,description,in_stock")
       .eq("business_id", data.business_id)
       .eq("in_stock", true)
       .order("created_at", { ascending: false })
@@ -3158,7 +3158,7 @@ app.get("/public/shop/:slug", async (req, res) => {
       slug             : data.business_slug,
       products         : (products || []).map(p => ({
         id: p.id, name: p.name, price: p.price,
-        image_url: p.image_url, category: p.category, description: p.description,
+        image_url: p.image_url, category: p.category, description: p.description, in_stock: p.in_stock,
       })),
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
