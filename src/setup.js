@@ -307,6 +307,17 @@ async function setup() {
   await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS instagram_access_token  TEXT    NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings  ADD COLUMN IF NOT EXISTS instagram_account_id    TEXT    NOT NULL DEFAULT ''`);
 
+  // ── web_otps ──────────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS web_otps (
+      email      TEXT PRIMARY KEY,
+      otp        TEXT NOT NULL,
+      expires_at BIGINT NOT NULL,
+      verified   BOOLEAN NOT NULL DEFAULT false,
+      created_at BIGINT NOT NULL DEFAULT 0
+    )
+  `);
+
   console.log("[Setup] All tables ready ✓");
 }
 

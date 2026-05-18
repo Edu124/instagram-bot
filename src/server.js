@@ -4,10 +4,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 require("dotenv").config();
 
-const express    = require("express");
-const bodyParser = require("body-parser");
-const path       = require("path");
-const fs         = require("fs");
+const express      = require("express");
+const bodyParser   = require("body-parser");
+const path         = require("path");
+const fs           = require("fs");
+const nodemailer   = require("nodemailer");
 
 // ── DB setup ──────────────────────────────────────────────────────────────────
 const { setup } = require("./setup");
@@ -217,6 +218,30 @@ function _waCtx(to) {
     token  : s?.waToken || DEFAULT_WA_TOKEN,
   };
 }
+// ── Email helper (Nodemailer) ─────────────────────────────────────────────────
+const _mailTransport = nodemailer.createTransport({
+  host   : process.env.SMTP_HOST || "smtp.gmail.com",
+  port   : Number(process.env.SMTP_PORT || 587),
+  secure : false,
+  auth   : { user: process.env.SMTP_USER || "", pass: process.env.SMTP_PASS || "" },
+});
+const SMTP_FROM = process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@selly.in";
+
+async function sendEmail(to, subject, html) {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.warn("[Email] SMTP not configured — skipping email to", to);
+    return false;
+  }
+  try {
+    await _mailTransport.sendMail({ from: `Selly <${SMTP_FROM}>`, to, subject, html });
+    console.log(`[Email] Sent "${subject}" to ${to}`);
+    return true;
+  } catch (e) {
+    console.error("[Email] Send error:", e.message);
+    return false;
+  }
+}
+
 // ── Instagram send helpers ────────────────────────────────────────────────────
 const INSTAGRAM_PAGE_ID      = (process.env.INSTAGRAM_PAGE_ID      || "").trim();
 const INSTAGRAM_ACCESS_TOKEN = (process.env.INSTAGRAM_ACCESS_TOKEN || "").trim();
@@ -3136,7 +3161,7 @@ app.get("/public/shop/:slug", async (req, res) => {
     if (!supabaseAdmin) return res.status(503).json({ error: "Not configured" });
     const { data, error } = await supabaseAdmin
       .from("business_settings")
-      .select("business_id,business_name,industry,city,instagram_handle,whatsapp_number,bot_whatsapp,whatsapp_enabled,instagram_enabled,business_address,business_slug")
+      .select("business_id,business_name,industry,city,instagram_handle,whatsapp_number,bot_whatsapp,whatsapp_enabled,instagram_enabled,business_address,business_slug,gst_enabled,gst_rate,delivery_charge,free_above,cod_fee")
       .eq("business_slug", req.params.slug)
       .maybeSingle();
     if (error || !data) return res.status(404).json({ error: "Shop not found" });
@@ -3155,10 +3180,16 @@ app.get("/public/shop/:slug", async (req, res) => {
       industry         : data.industry,
       city             : data.city,
       instagram_handle : data.instagram_handle,
+      business_id       : data.business_id,
       whatsapp_number   : data.bot_whatsapp || data.whatsapp_number,
       whatsapp_enabled  : data.whatsapp_enabled  || false,
       instagram_enabled : data.instagram_enabled || false,
       business_address  : data.business_address,
+      gst_enabled       : data.gst_enabled !== false,
+      gst_rate          : data.gst_rate      || 5,
+      delivery_charge   : data.delivery_charge || 0,
+      free_above        : data.free_above    || 0,
+      cod_fee           : data.cod_fee       || 0,
       slug             : data.business_slug,
       products         : (products || []).map(p => ({
         id: p.id, name: p.name, price: p.price,
@@ -3213,6 +3244,179 @@ app.get("/public/shop/:slug/reels", async (req, res) => {
 
     res.json({ reels });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Web Ordering APIs ─────────────────────────────────────────────────────────
+
+// POST /api/web/send-otp — send 6-digit OTP to customer email
+app.post("/api/web/send-otp", async (req, res) => {
+  const { email, business_name } = req.body || {};
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    return res.status(400).json({ error: "Invalid email" });
+
+  const otp        = String(Math.floor(100000 + Math.random() * 900000));
+  const expires_at = Date.now() + 10 * 60 * 1000; // 10 min
+
+  try {
+    await db.query(
+      `INSERT INTO web_otps (email, otp, expires_at, created_at)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (email) DO UPDATE SET otp=$2, expires_at=$3, verified=false, created_at=$4`,
+      [email.toLowerCase(), otp, expires_at, Date.now()]
+    );
+
+    const html = `
+      <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:24px">
+        <h2 style="color:#7c3aed">Your ${business_name || "Selly"} order OTP</h2>
+        <p style="font-size:15px;color:#555">Use the code below to confirm your order. It expires in <b>10 minutes</b>.</p>
+        <div style="background:#f5f3ff;border-radius:12px;padding:20px 32px;text-align:center;margin:24px 0">
+          <span style="font-size:40px;font-weight:700;letter-spacing:8px;color:#7c3aed">${otp}</span>
+        </div>
+        <p style="font-size:13px;color:#999">If you didn't request this, ignore this email.</p>
+      </div>`;
+
+    await sendEmail(email, `${otp} — Your order verification code`, html);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/web/verify-otp — verify OTP, return a short-lived token
+app.post("/api/web/verify-otp", async (req, res) => {
+  const { email, otp } = req.body || {};
+  if (!email || !otp) return res.status(400).json({ error: "Missing fields" });
+
+  try {
+    const { rows } = await db.query(
+      `SELECT otp, expires_at FROM web_otps WHERE email=$1`,
+      [email.toLowerCase()]
+    );
+    const row = rows[0];
+    if (!row)                          return res.status(400).json({ error: "No OTP found. Please request a new one." });
+    if (Date.now() > row.expires_at)   return res.status(400).json({ error: "OTP expired. Please request a new one." });
+    if (row.otp !== String(otp).trim()) return res.status(400).json({ error: "Incorrect OTP." });
+
+    // Mark verified
+    await db.query(`UPDATE web_otps SET verified=true WHERE email=$1`, [email.toLowerCase()]);
+    // Simple token: base64(email:timestamp) — server re-validates on order
+    const token = Buffer.from(`${email.toLowerCase()}:${Date.now()}`).toString("base64");
+    res.json({ ok: true, token });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/web/order — place order from website
+app.post("/api/web/order", async (req, res) => {
+  const { bid, cart, customer, payment_mode, otp_token } = req.body || {};
+  if (!bid || !cart?.length || !customer?.email || !otp_token)
+    return res.status(400).json({ error: "Missing required fields" });
+
+  // Validate OTP token (must be verified within last 15 min)
+  try {
+    const decoded    = Buffer.from(otp_token, "base64").toString("utf8");
+    const [tokEmail, tokTs] = decoded.split(":");
+    if (tokEmail !== customer.email.toLowerCase()) return res.status(400).json({ error: "OTP token mismatch" });
+    if (Date.now() - Number(tokTs) > 15 * 60 * 1000) return res.status(400).json({ error: "Session expired. Please verify email again." });
+
+    const { rows } = await db.query(
+      `SELECT verified FROM web_otps WHERE email=$1`, [customer.email.toLowerCase()]
+    );
+    if (!rows[0]?.verified) return res.status(400).json({ error: "Email not verified" });
+  } catch (_) { return res.status(400).json({ error: "Invalid token" }); }
+
+  try {
+    const settings = await getSettings(bid);
+    const gstRate    = settings.gst_enabled ? (Number(settings.gst_rate) || 5) : 0;
+    const delivFee   = Number(settings.delivery_charge) || 0;
+    const freeAbove  = Number(settings.free_above) || 0;
+    const codFee     = payment_mode === "cod" ? (Number(settings.cod_fee) || 0) : 0;
+
+    // Build bill
+    let subtotal = 0;
+    const cartItems = cart.map(item => {
+      const lineTotal = item.price * item.qty;
+      subtotal += lineTotal;
+      return { name: item.name, qty: item.qty, price: item.price, size: item.size || "", total: lineTotal };
+    });
+
+    const gstAmt  = Math.round(subtotal * gstRate / 100);
+    const delivery = freeAbove > 0 && subtotal >= freeAbove ? 0 : delivFee;
+    const total    = subtotal + gstAmt + delivery + codFee;
+
+    const bill = { subtotal, gst: gstAmt, gst_rate: gstRate, delivery, cod_fee: codFee, total };
+
+    // Delivery OTP for COD
+    const delivOtp = payment_mode === "cod" ? String(Math.floor(1000 + Math.random() * 9000)) : null;
+
+    const orderId = "WEB" + Date.now().toString(36).toUpperCase();
+    await db.query(
+      `INSERT INTO orders (id,business_id,name,cart,address,mobile,bill,payment_mode,status,source,created_at,updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'website',NOW(),NOW())`,
+      [orderId, bid, customer.name, JSON.stringify(cartItems),
+       customer.address || "", customer.phone || "",
+       JSON.stringify(bill), payment_mode || "cod", "pending_payment"]
+    );
+
+    // Store delivery OTP
+    if (delivOtp) {
+      await db.query(
+        `INSERT INTO order_otps (order_id, delivery_otp) VALUES ($1,$2)
+         ON CONFLICT (order_id) DO UPDATE SET delivery_otp=$2`,
+        [orderId, delivOtp]
+      );
+    }
+
+    // Send confirmation email to customer
+    const itemsHtml = cartItems.map(i =>
+      `<tr><td style="padding:6px 0;border-bottom:1px solid #eee">${i.name}${i.size ? ` (${i.size})` : ""}</td>
+       <td style="padding:6px 0;border-bottom:1px solid #eee;text-align:center">${i.qty}</td>
+       <td style="padding:6px 0;border-bottom:1px solid #eee;text-align:right">₹${i.total.toLocaleString("en-IN")}</td></tr>`
+    ).join("");
+
+    const confirmHtml = `
+      <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px">
+        <h2 style="color:#7c3aed">Order Confirmed! 🎉</h2>
+        <p style="color:#555">Hi ${customer.name}, your order <b>#${orderId}</b> has been placed successfully.</p>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0">
+          <tr style="background:#f5f3ff"><th style="padding:8px;text-align:left">Item</th><th style="padding:8px">Qty</th><th style="padding:8px;text-align:right">Total</th></tr>
+          ${itemsHtml}
+        </table>
+        <table style="width:100%;margin:8px 0">
+          <tr><td style="color:#888">Subtotal</td><td style="text-align:right">₹${subtotal.toLocaleString("en-IN")}</td></tr>
+          ${gstAmt ? `<tr><td style="color:#888">GST (${gstRate}%)</td><td style="text-align:right">₹${gstAmt.toLocaleString("en-IN")}</td></tr>` : ""}
+          ${delivery ? `<tr><td style="color:#888">Delivery</td><td style="text-align:right">₹${delivery.toLocaleString("en-IN")}</td></tr>` : ""}
+          ${codFee ? `<tr><td style="color:#888">COD fee</td><td style="text-align:right">₹${codFee.toLocaleString("en-IN")}</td></tr>` : ""}
+          <tr style="font-weight:700"><td>Total</td><td style="text-align:right;color:#7c3aed">₹${total.toLocaleString("en-IN")}</td></tr>
+        </table>
+        ${delivOtp ? `<div style="background:#fef9c3;border-radius:8px;padding:12px 16px;margin:16px 0">
+          <b>🔒 Delivery OTP: ${delivOtp}</b><br>
+          <small style="color:#888">Share this code with the delivery person to confirm delivery.</small>
+        </div>` : ""}
+        <p style="font-size:13px;color:#999">Payment mode: ${payment_mode === "cod" ? "Cash on Delivery" : "Online"}</p>
+      </div>`;
+
+    await sendEmail(customer.email, `Order Confirmed — #${orderId}`, confirmHtml);
+
+    // Notify owner via WhatsApp
+    const ownerMsg = `🛒 *New Web Order #${orderId}*\n👤 ${customer.name} (${customer.phone || "no phone"})\n📧 ${customer.email}\n💰 ₹${total.toLocaleString("en-IN")} (${payment_mode.toUpperCase()})\n📦 ${cartItems.map(i => `${i.name} x${i.qty}`).join(", ")}`;
+    try {
+      const c = _waCtx("owner");
+      const ownNum = settings.whatsapp_number?.replace(/\D/g, "");
+      if (ownNum) await wa.send(ownNum, ownerMsg, c.phoneId, c.token);
+    } catch (_) {}
+
+    // Razorpay link for online payment
+    let pay_link = null;
+    if (payment_mode === "online") {
+      try {
+        const { createPaymentLink } = require("./payment");
+        pay_link = await createPaymentLink(orderId, total, customer.name, customer.phone || "", customer.email);
+      } catch (_) {}
+    }
+
+    res.json({ ok: true, order_id: orderId, total, pay_link, delivery_otp: delivOtp });
+  } catch (e) {
+    console.error("[WebOrder]", e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // GET /public/shops — all active businesses for directory page
