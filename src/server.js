@@ -3555,6 +3555,27 @@ function getBid(req) {
   return req.headers["x-business-id"] || req.query.bid || req.query.businessId || DEFAULT_BUSINESS_ID;
 }
 
+// ── App Version / Force-Update Gate ──────────────────────────────────────────
+// GET /api/app/version — returns minimum required app version and APK URL.
+// The Selly app calls this on every startup to decide whether to show the
+// blocking "Download Update" modal (Layer 2 of the OTA update system).
+//
+// Configure via Railway environment variables (no redeploy needed):
+//   APP_MIN_VERSION    — e.g. "1.1.0"  — update this to force old APKs to upgrade
+//   APP_LATEST_VERSION — e.g. "1.1.0"  — informational, shown in modal subtitle
+//   APP_APK_URL        — direct GitHub Releases .apk download URL
+//   APP_RELEASE_NOTES  — text shown in the update modal (plain text)
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/api/app/version", (req, res) => {
+  res.setHeader("Cache-Control", "no-store"); // always fresh, never CDN-cached
+  res.json({
+    latest_version: process.env.APP_LATEST_VERSION || "1.0.0",
+    min_version   : process.env.APP_MIN_VERSION    || "1.0.0",
+    apk_url       : process.env.APP_APK_URL        || "",
+    release_notes : process.env.APP_RELEASE_NOTES  || "Bug fixes and performance improvements.",
+  });
+});
+
 app.get("/api/billing/summary", async (req, res) => {
   const bid     = getBid(req);
   const sub     = await subscriptions.get(bid);
