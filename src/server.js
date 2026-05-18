@@ -3081,6 +3081,7 @@ app.post("/api/settings", async (req, res) => {
     "greeting_message","location_url", // bot customisation
     "faq_text",                        // AI FAQ context
     "instagram_handle","city",         // shop page / AI discovery
+    "bot_whatsapp",                    // customer-facing bot WhatsApp (shown on shop page)
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {
@@ -3133,17 +3134,10 @@ app.get("/public/shop/:slug", async (req, res) => {
     if (!supabaseAdmin) return res.status(503).json({ error: "Not configured" });
     const { data, error } = await supabaseAdmin
       .from("business_settings")
-      .select("business_id,business_name,industry,city,instagram_handle,whatsapp_number,business_address,business_slug")
+      .select("business_id,business_name,industry,city,instagram_handle,whatsapp_number,bot_whatsapp,business_address,business_slug")
       .eq("business_slug", req.params.slug)
       .maybeSingle();
     if (error || !data) return res.status(404).json({ error: "Shop not found" });
-
-    // Fetch bot WhatsApp number from whatsapp_numbers table
-    const { data: waNum } = await db.query(
-      `SELECT phone_number FROM whatsapp_numbers WHERE business_id=$1 AND active=true LIMIT 1`,
-      [data.business_id]
-    ).catch(() => ({ data: null }));
-    const botWhatsapp = (waNum?.rows?.[0]?.phone_number || "").trim();
 
     // Fetch top 8 in-stock products from catalog
     const { data: products } = await supabaseAdmin
@@ -3159,7 +3153,7 @@ app.get("/public/shop/:slug", async (req, res) => {
       industry         : data.industry,
       city             : data.city,
       instagram_handle : data.instagram_handle,
-      whatsapp_number  : botWhatsapp || data.whatsapp_number,
+      whatsapp_number  : data.bot_whatsapp || data.whatsapp_number,
       business_address : data.business_address,
       slug             : data.business_slug,
       products         : (products || []).map(p => ({
