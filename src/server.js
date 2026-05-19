@@ -3187,7 +3187,7 @@ app.get("/public/shop/:slug", async (req, res) => {
     // Fetch top 8 in-stock products from catalog
     const { data: products } = await supabaseAdmin
       .from("catalog")
-      .select("id,name,price,image_url,category,description,in_stock,colors,sizes,has_sizes,material,product_number")
+      .select("id,name,price,image_url,image_urls,category,description,in_stock,colors,sizes,has_sizes,material,product_number")
       .eq("business_id", data.business_id)
       .eq("in_stock", true)
       .order("created_at", { ascending: false })
