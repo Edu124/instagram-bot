@@ -3179,7 +3179,7 @@ app.get("/public/shop/:slug", async (req, res) => {
     if (!supabaseAdmin) return res.status(503).json({ error: "Not configured" });
     const { data, error } = await supabaseAdmin
       .from("business_settings")
-      .select("business_id,business_name,industry,city,instagram_handle,whatsapp_number,bot_whatsapp,whatsapp_enabled,instagram_enabled,business_address,business_slug,gst_enabled,gst_rate,delivery_charge,free_above,cod_fee,return_policy")
+      .select("business_id,business_name,industry,city,instagram_handle,whatsapp_number,bot_whatsapp,whatsapp_enabled,instagram_enabled,business_address,business_slug,gst_enabled,gst_rate,delivery_charge,free_above,cod_fee,return_policy,payment_modes")
       .eq("business_slug", req.params.slug)
       .maybeSingle();
     if (error || !data) return res.status(404).json({ error: "Shop not found" });
@@ -3210,6 +3210,7 @@ app.get("/public/shop/:slug", async (req, res) => {
       cod_fee           : data.cod_fee       || 0,
       slug             : data.business_slug,
       return_policy    : data.return_policy || "",
+      payment_modes    : data.payment_modes || "both",
       products         : (products || []).map(p => ({
         id: p.id, name: p.name, price: p.price,
         image_url: p.image_url, category: p.category, description: p.description,
@@ -3243,6 +3244,30 @@ app.get("/public/shop/:slug/reviews", async (req, res) => {
       : null;
     res.json({ reviews: rows, average: avg, total: rows.length });
   } catch (e) { res.json({ reviews: [], average: null, total: 0 }); }
+});
+
+// GET /public/shop/:slug/my-orders?email=xxx — order history for a customer email
+app.get("/public/shop/:slug/my-orders", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const email = (req.query.email || "").trim().toLowerCase();
+  if (!email) return res.status(400).json({ error: "Email required" });
+  try {
+    if (!supabaseAdmin) return res.json({ orders: [] });
+    const { data: biz } = await supabaseAdmin
+      .from("business_settings")
+      .select("business_id")
+      .eq("business_slug", req.params.slug)
+      .maybeSingle();
+    if (!biz) return res.json({ orders: [] });
+    const { rows } = await db.query(
+      `SELECT id, name, cart, status, bill, payment_mode, created_at
+       FROM orders
+       WHERE business_id=$1 AND LOWER(customer_email)=$2
+       ORDER BY created_at DESC LIMIT 20`,
+      [biz.business_id, email]
+    );
+    res.json({ orders: rows });
+  } catch (e) { res.json({ orders: [] }); }
 });
 
 // GET /public/shop/:slug/reels — recent Instagram posts/reels for shop page
@@ -3334,11 +3359,12 @@ app.post("/api/web/order", async (req, res) => {
 
     const orderId = "WEB" + Date.now().toString(36).toUpperCase();
     await db.query(
-      `INSERT INTO orders (id,business_id,name,cart,address,mobile,bill,payment_mode,status,source,created_at,updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'website',NOW(),NOW())`,
+      `INSERT INTO orders (id,business_id,name,cart,address,mobile,bill,payment_mode,status,source,customer_email,created_at,updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'website',$10,NOW(),NOW())`,
       [orderId, bid, customer.name, JSON.stringify(cartItems),
        customer.address || "", customer.phone || "",
-       JSON.stringify(bill), payment_mode || "cod", "pending_payment"]
+       JSON.stringify(bill), payment_mode || "cod", "pending_payment",
+       customer.email || ""]
     );
 
     // Store delivery OTP

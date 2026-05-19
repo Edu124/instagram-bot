@@ -296,6 +296,8 @@ async function setup() {
   //   ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS instagram_handle TEXT NOT NULL DEFAULT '';
   //   ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS city             TEXT NOT NULL DEFAULT '';
   //   ALTER TABLE catalog           ADD COLUMN IF NOT EXISTS stock_count      INTEGER NOT NULL DEFAULT -1;
+  //   ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS payment_modes    TEXT NOT NULL DEFAULT 'both';
+  //   ALTER TABLE catalog           ADD COLUMN IF NOT EXISTS image_urls       JSONB NOT NULL DEFAULT '[]';
   await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS faq_text         TEXT NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS business_slug    TEXT NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS instagram_handle TEXT NOT NULL DEFAULT ''`);
@@ -311,6 +313,8 @@ async function setup() {
   await db.query(`ALTER TABLE catalog             ADD COLUMN IF NOT EXISTS image_urls               JSONB   NOT NULL DEFAULT '[]'`);
   await db.query(`ALTER TABLE order_reviews       ADD COLUMN IF NOT EXISTS product_name             TEXT    NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE return_requests     ADD COLUMN IF NOT EXISTS customer_phone           TEXT    NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE orders              ADD COLUMN IF NOT EXISTS customer_email           TEXT    NOT NULL DEFAULT ''`);
+  await db.query(`ALTER TABLE business_settings   ADD COLUMN IF NOT EXISTS payment_modes            TEXT    NOT NULL DEFAULT 'both'`);
 
   // ── return_requests ───────────────────────────────────────────────────────────
   await db.query(`
