@@ -466,7 +466,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
                 await send(senderId, fwdMsg[imgLang] || fwdMsg.english);
                 await notifyOwner(routedBusinessId, senderId, name, "[Image shared by student]", "query");
                 // Build proxy URL so the app can display the image (media ID alone is not a valid URL)
-                const _serverBase = process.env.SERVER_URL || "https://instagram-bot-production-ef01.up.railway.app";
+                const _serverBase = process.env.SERVER_URL || "https://instagram-bot-production-b993.up.railway.app";
                 const _proxyUrl   = `${_serverBase}/api/media/${imageUrl}?bid=${routedBusinessId}`;
                 await photoInquiry.create(senderId, _proxyUrl, name);
               } else {
@@ -1240,7 +1240,7 @@ async function handleSearch(customerId, sess, message, name) {
     const industry    = bizSettings.industry || "product";
 
     if (industry !== "kirana" && !industry.includes("education")) {
-      const BASE_URL = (process.env.BASE_URL || "https://instagram-bot-production-ef01.up.railway.app").replace(/\/$/, "");
+      const BASE_URL = (process.env.BASE_URL || "https://instagram-bot-production-b993.up.railway.app").replace(/\/$/, "");
       const shopUrl  = shop.buildShopUrl(BASE_URL, bizId, intent);
 
       const linkMsg = {
@@ -2822,7 +2822,7 @@ app.post("/api/promote/upload", async (req, res) => {
     await fs.promises.mkdir(dir, { recursive: true });
     await fs.promises.writeFile(path.join(dir, name), buf);
 
-    const BASE_URL = (process.env.BASE_URL || "https://instagram-bot-production-ef01.up.railway.app").replace(/\/$/, "");
+    const BASE_URL = (process.env.BASE_URL || "https://instagram-bot-production-b993.up.railway.app").replace(/\/$/, "");
     res.json({ ok: true, url: `${BASE_URL}/media/${name}`, filename: name });
   } catch (e) {
     res.status(500).json({ error: e.message });
