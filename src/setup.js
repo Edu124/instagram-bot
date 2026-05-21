@@ -315,6 +315,7 @@ async function setup() {
   await db.query(`ALTER TABLE return_requests     ADD COLUMN IF NOT EXISTS customer_phone           TEXT    NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE orders              ADD COLUMN IF NOT EXISTS customer_email           TEXT    NOT NULL DEFAULT ''`);
   await db.query(`ALTER TABLE business_settings   ADD COLUMN IF NOT EXISTS payment_modes            TEXT    NOT NULL DEFAULT 'both'`);
+  await db.query(`ALTER TABLE catalog             ADD COLUMN IF NOT EXISTS video_url                TEXT    NOT NULL DEFAULT ''`);
 
   // ── return_requests ───────────────────────────────────────────────────────────
   await db.query(`

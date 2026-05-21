@@ -3386,6 +3386,25 @@ app.post("/api/web/order", async (req, res) => {
       if (ownNum) await wa.send(ownNum, ownerMsg, c.phoneId, c.token);
     } catch (_) {}
 
+    // Send order confirmation to customer on WhatsApp (if phone provided)
+    try {
+      const custPhone = (customer.phone || "").replace(/\D/g, "");
+      const c = _waCtx("owner");
+      if (custPhone && c.phoneId && c.token && settings.bot_whatsapp) {
+        const itemLines = cartItems.map(i => `  • ${i.name}${i.size ? ` (${i.size})` : ""} ×${i.qty} — ₹${i.total.toLocaleString("en-IN")}`).join("\n");
+        let billLines = `Subtotal: ₹${bill.subtotal.toLocaleString("en-IN")}`;
+        if (bill.gst > 0) billLines += `\nGST (${bill.gst_rate}%): ₹${bill.gst.toLocaleString("en-IN")}`;
+        if (bill.delivery > 0) billLines += `\nDelivery: ₹${bill.delivery.toLocaleString("en-IN")}`;
+        if (bill.cod_fee > 0) billLines += `\nCOD Fee: ₹${bill.cod_fee.toLocaleString("en-IN")}`;
+        billLines += `\n*Total: ₹${bill.total.toLocaleString("en-IN")}*`;
+        const payLine = payment_mode === "cod"
+          ? `💵 Payment: Cash on Delivery${delivOtp ? `\n🔐 Delivery OTP: *${delivOtp}* (share with delivery person)` : ""}`
+          : `💳 Payment: Online (link will be sent separately)`;
+        const custMsg = `✅ *Order Confirmed!*\n\nHi ${customer.name}, your order has been placed successfully.\n\n*Order ID:* ${orderId}\n\n*Items:*\n${itemLines}\n\n*Bill Summary:*\n${billLines}\n\n${payLine}\n\nThank you for shopping with us! 🙏`;
+        await wa.send(custPhone, custMsg, c.phoneId, c.token);
+      }
+    } catch (_) {}
+
     // Notify owner via Expo push (Selly app notification)
     try {
       const pushToken = settings.expo_push_token;
