@@ -3898,6 +3898,187 @@ app.get("/api/catalog/low-stock", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AI STUDIO ENDPOINTS  (used by AIStudioScreen in the app)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// POST /api/ai/generate — caption / reel script / product description writer
+// Body: { type, context, industry, businessName, tone }
+// type: "caption" | "description" | "reel_script" | "flashcard" | "quiz"
+app.post("/api/ai/generate", async (req, res) => {
+  if (!GROQ_API_KEY) return res.status(503).json({ error: "AI service not configured" });
+  const bid = getBid(req);
+  const { type = "caption", context = "", industry = "product", businessName = "", tone = "friendly" } = req.body;
+  if (!context.trim()) return res.status(400).json({ error: "context is required" });
+
+  const prompts = {
+    caption: `You are a social media expert for ${businessName || "a small business"} (${industry} industry). Write a catchy Instagram/WhatsApp caption for the following product or post context. Keep it under 150 words, use relevant emojis, include a call-to-action. Tone: ${tone}.\n\nContext: ${context}`,
+    description: `You are a product copywriter for ${businessName || "a small business"} (${industry} industry). Write a compelling product description (2-3 paragraphs) for the following product. Highlight key features, benefits and use cases. Tone: ${tone}.\n\nProduct info: ${context}`,
+    reel_script: `You are a content creator for ${businessName || "a small business"} (${industry} industry). Write a punchy 30-second Instagram Reel script. Include a hook (first 3 seconds), main content, and CTA. Format as: HOOK: / CONTENT: / CTA:. Tone: ${tone}.\n\nTopic: ${context}`,
+    flashcard: `You are an education expert. Create 5 question-answer flashcards for the following topic. Format as numbered list: Q: [question]\nA: [answer]. Keep answers concise.\n\nTopic: ${context}`,
+    quiz: `You are an education expert. Create 5 multiple-choice quiz questions for the following topic. Format: Q: [question]\nA) [option]\nB) [option]\nC) [option]\nD) [option]\nAnswer: [letter]\n\nTopic: ${context}`,
+  };
+
+  const systemPrompt = prompts[type] || prompts.caption;
+
+  try {
+    const body = JSON.stringify({
+      model: "llama3-8b-8192",
+      messages: [{ role: "user", content: systemPrompt }],
+      max_tokens: 600,
+      temperature: 0.8,
+    });
+    const result = await new Promise((resolve, reject) => {
+      const https = require("https");
+      const reqHttp = https.request(
+        { hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+        (resp) => {
+          let data = "";
+          resp.on("data", c => data += c);
+          resp.on("end", () => {
+            try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); }
+          });
+        }
+      );
+      reqHttp.on("error", reject);
+      reqHttp.write(body);
+      reqHttp.end();
+    });
+    const text = result?.choices?.[0]?.message?.content?.trim() || "";
+    if (!text) return res.status(500).json({ error: "Empty AI response" });
+    res.json({ result: text, type, model: "llama3-8b-8192" });
+  } catch (e) {
+    console.error("[AI generate]", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/ai/insights — smart business insights from stats
+// Body: { period? }  — uses business_id from query/header
+app.post("/api/ai/insights", async (req, res) => {
+  if (!GROQ_API_KEY) return res.status(503).json({ error: "AI service not configured" });
+  const bid = getBid(req);
+
+  try {
+    // Gather stats from DB
+    const [ordersR, topR, customersR, settingsR] = await Promise.all([
+      db.query(`SELECT status, COUNT(*) as cnt, SUM((bill->>'total')::numeric) as rev FROM orders WHERE business_id=$1 AND created_at > NOW()-INTERVAL '30 days' GROUP BY status`, [bid]),
+      db.query(`SELECT c.name, COUNT(*) as orders FROM orders o, jsonb_array_elements(o.cart) as c(item) WHERE o.business_id=$1 AND o.created_at > NOW()-INTERVAL '30 days' GROUP BY c.name ORDER BY orders DESC LIMIT 5`, [bid]),
+      db.query(`SELECT COUNT(*) as total, COUNT(CASE WHEN total_orders=1 THEN 1 END) as new_c, COUNT(CASE WHEN total_orders>1 THEN 1 END) as repeat_c FROM bot_customers WHERE business_id=$1`, [bid]),
+      db.query(`SELECT industry, business_name FROM business_settings WHERE business_id=$1`, [bid]),
+    ]);
+
+    const settings = settingsR.rows[0] || {};
+    const stats = {
+      orders   : ordersR.rows,
+      topItems : topR.rows.map(r => r.name || "").filter(Boolean).slice(0, 5),
+      customers: customersR.rows[0] || {},
+    };
+
+    const totalOrders = stats.orders.reduce((s, r) => s + parseInt(r.cnt || 0), 0);
+    const totalRev    = stats.orders.reduce((s, r) => s + parseFloat(r.rev || 0), 0);
+    const delivered   = stats.orders.find(r => r.status === "delivered");
+
+    const contextText = `Business: ${settings.business_name || "My Store"} (${settings.industry || "product"} industry)\n` +
+      `Last 30 days: ${totalOrders} orders, ₹${totalRev.toFixed(0)} revenue, ${delivered?.cnt || 0} delivered\n` +
+      `Top products: ${stats.topItems.join(", ") || "N/A"}\n` +
+      `Customers: ${stats.customers.total || 0} total, ${stats.customers.new_c || 0} new, ${stats.customers.repeat_c || 0} repeat`;
+
+    const prompt = `You are a business analyst. Analyze these stats for a small business and give 3-5 specific, actionable insights. Focus on: what's working, what to improve, opportunities to grow revenue. Be direct and specific. Format as numbered list.\n\n${contextText}`;
+
+    const body = JSON.stringify({
+      model: "llama3-8b-8192",
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 500,
+      temperature: 0.6,
+    });
+    const result = await new Promise((resolve, reject) => {
+      const https = require("https");
+      const reqHttp = https.request(
+        { hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+        (resp) => {
+          let data = "";
+          resp.on("data", c => data += c);
+          resp.on("end", () => {
+            try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); }
+          });
+        }
+      );
+      reqHttp.on("error", reject);
+      reqHttp.write(body);
+      reqHttp.end();
+    });
+    const text = result?.choices?.[0]?.message?.content?.trim() || "";
+    res.json({ insights: text, stats: { totalOrders, totalRev: Math.round(totalRev), topItems: stats.topItems } });
+  } catch (e) {
+    console.error("[AI insights]", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/ai/image — product image generation via Replicate Flux Schnell
+// Body: { prompt, style? }
+app.post("/api/ai/image", async (req, res) => {
+  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN || "";
+  if (!REPLICATE_TOKEN) return res.status(503).json({ error: "Image generation not configured. Set REPLICATE_API_TOKEN." });
+  const { prompt = "", style = "product photography, white background, professional" } = req.body;
+  if (!prompt.trim()) return res.status(400).json({ error: "prompt is required" });
+
+  try {
+    const https = require("https");
+    // Trigger prediction on Flux Schnell (fast & cheap ~$0.003/image)
+    const inputBody = JSON.stringify({
+      version: "black-forest-labs/flux-schnell",
+      input: { prompt: `${prompt}, ${style}`, num_outputs: 1, output_format: "webp" },
+    });
+    const prediction = await new Promise((resolve, reject) => {
+      const reqHttp = https.request(
+        { hostname: "api.replicate.com", path: "/v1/predictions", method: "POST",
+          headers: { "Authorization": `Token ${REPLICATE_TOKEN}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(inputBody) } },
+        (resp) => {
+          let data = "";
+          resp.on("data", c => data += c);
+          resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
+        }
+      );
+      reqHttp.on("error", reject);
+      reqHttp.write(inputBody);
+      reqHttp.end();
+    });
+
+    if (!prediction.id) return res.status(500).json({ error: prediction.detail || "Failed to start prediction" });
+
+    // Poll until complete (max 30s)
+    let output = null;
+    for (let i = 0; i < 15; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      const poll = await new Promise((resolve, reject) => {
+        const reqPoll = https.request(
+          { hostname: "api.replicate.com", path: `/v1/predictions/${prediction.id}`, method: "GET",
+            headers: { "Authorization": `Token ${REPLICATE_TOKEN}` } },
+          (resp) => {
+            let data = "";
+            resp.on("data", c => data += c);
+            resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
+          }
+        );
+        reqPoll.on("error", reject);
+        reqPoll.end();
+      });
+      if (poll.status === "succeeded") { output = poll.output?.[0] || null; break; }
+      if (poll.status === "failed")    { return res.status(500).json({ error: poll.error || "Generation failed" }); }
+    }
+
+    if (!output) return res.status(504).json({ error: "Image generation timed out" });
+    res.json({ imageUrl: output, prompt });
+  } catch (e) {
+    console.error("[AI image]", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TEST CHAT (no WhatsApp needed — used by test-chat.html)
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/test/chat", async (req, res) => {
