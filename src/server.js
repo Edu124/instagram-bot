@@ -3903,6 +3903,309 @@ app.get("/api/reviews", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// ACCOUNTING — Expenses, P&L Summary, GST Report
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get("/api/accounting/expenses", async (req, res) => {
+  const bid = getBid(req);
+  const { month } = req.query; // "2025-05" format
+  try {
+    let q = `SELECT * FROM expenses WHERE business_id=$1`;
+    const params = [bid];
+    if (month) { q += ` AND TO_CHAR(date,'YYYY-MM')=$2`; params.push(month); }
+    q += ` ORDER BY date DESC`;
+    const { rows } = await db.query(q, params);
+    res.json({ expenses: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/accounting/expenses", async (req, res) => {
+  const bid = getBid(req);
+  const { amount, category = "general", description = "", vendor = "", date } = req.body;
+  if (!amount) return res.status(400).json({ error: "amount required" });
+  try {
+    const id = `exp_${Date.now()}`;
+    await db.query(
+      `INSERT INTO expenses(id,business_id,amount,category,description,vendor,date) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+      [id, bid, Number(amount), category, description, vendor, date || new Date().toISOString().slice(0,10)]
+    );
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete("/api/accounting/expenses/:id", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    await db.query(`DELETE FROM expenses WHERE id=$1 AND business_id=$2`, [req.params.id, bid]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/accounting/summary", async (req, res) => {
+  const bid = getBid(req);
+  const { month } = req.query; // "2025-05"
+  const cur = month || new Date().toISOString().slice(0,7);
+  try {
+    const [ordersR, expR, gstR] = await Promise.all([
+      db.query(
+        `SELECT COUNT(*) as cnt, COALESCE(SUM((bill->>'total')::numeric),0) as revenue, COALESCE(SUM((bill->>'gstAmt')::numeric),0) as gst_collected
+         FROM orders WHERE business_id=$1 AND status='delivered' AND TO_CHAR(created_at,'YYYY-MM')=$2`,
+        [bid, cur]
+      ),
+      db.query(
+        `SELECT COALESCE(SUM(amount),0) as total, category FROM expenses WHERE business_id=$1 AND TO_CHAR(date,'YYYY-MM')=$2 GROUP BY category ORDER BY total DESC`,
+        [bid, cur]
+      ),
+      db.query(
+        `SELECT COALESCE(SUM((bill->>'total')::numeric),0) as taxable, COALESCE(SUM((bill->>'gstAmt')::numeric),0) as gst
+         FROM orders WHERE business_id=$1 AND TO_CHAR(created_at,'YYYY-MM')=$2`,
+        [bid, cur]
+      ),
+    ]);
+    const revenue  = parseFloat(ordersR.rows[0]?.revenue   || 0);
+    const gstCollected = parseFloat(ordersR.rows[0]?.gst_collected || 0);
+    const expTotal = expR.rows.reduce((s, r) => s + parseFloat(r.total || 0), 0);
+    const profit   = revenue - expTotal;
+    res.json({
+      month    : cur,
+      revenue, gstCollected, expTotal, profit,
+      orders   : parseInt(ordersR.rows[0]?.cnt || 0),
+      expByCategory: expR.rows,
+      gst      : { taxable: parseFloat(gstR.rows[0]?.taxable || 0), collected: parseFloat(gstR.rows[0]?.gst || 0) },
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAYROLL — Employees, Attendance, Salary
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get("/api/payroll/employees", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    const { rows } = await db.query(`SELECT * FROM employees WHERE business_id=$1 ORDER BY name`, [bid]);
+    res.json({ employees: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/payroll/employees", async (req, res) => {
+  const bid = getBid(req);
+  const { name, role = "", salary = 0, mobile = "", join_date } = req.body;
+  if (!name) return res.status(400).json({ error: "name required" });
+  try {
+    const id = `emp_${Date.now()}`;
+    await db.query(
+      `INSERT INTO employees(id,business_id,name,role,salary,mobile,join_date) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+      [id, bid, name, role, Number(salary), mobile, join_date || null]
+    );
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put("/api/payroll/employees/:id", async (req, res) => {
+  const bid = getBid(req);
+  const { name, role, salary, mobile, status } = req.body;
+  try {
+    await db.query(
+      `UPDATE employees SET name=COALESCE($1,name), role=COALESCE($2,role), salary=COALESCE($3,salary),
+       mobile=COALESCE($4,mobile), status=COALESCE($5,status) WHERE id=$6 AND business_id=$7`,
+      [name, role, salary ? Number(salary) : null, mobile, status, req.params.id, bid]
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete("/api/payroll/employees/:id", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    await db.query(`UPDATE employees SET status='inactive' WHERE id=$1 AND business_id=$2`, [req.params.id, bid]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/payroll/attendance", async (req, res) => {
+  const bid = getBid(req);
+  const { month, employee_id } = req.query;
+  const cur = month || new Date().toISOString().slice(0,7);
+  try {
+    let q = `SELECT a.*, e.name as employee_name FROM attendance a JOIN employees e ON a.employee_id=e.id WHERE a.business_id=$1 AND TO_CHAR(a.date,'YYYY-MM')=$2`;
+    const params = [bid, cur];
+    if (employee_id) { q += ` AND a.employee_id=$3`; params.push(employee_id); }
+    q += ` ORDER BY a.date DESC`;
+    const { rows } = await db.query(q, params);
+    res.json({ attendance: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/payroll/attendance", async (req, res) => {
+  const bid = getBid(req);
+  const { employee_id, date, status = "present" } = req.body;
+  if (!employee_id) return res.status(400).json({ error: "employee_id required" });
+  try {
+    const id   = `att_${Date.now()}`;
+    const aDate = date || new Date().toISOString().slice(0,10);
+    await db.query(
+      `INSERT INTO attendance(id,business_id,employee_id,date,status) VALUES($1,$2,$3,$4,$5)
+       ON CONFLICT(employee_id,date) DO UPDATE SET status=$5`,
+      [id, bid, employee_id, aDate, status]
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/payroll/report", async (req, res) => {
+  const bid = getBid(req);
+  const { month } = req.query;
+  const cur = month || new Date().toISOString().slice(0,7);
+  try {
+    const { rows: emps } = await db.query(`SELECT * FROM employees WHERE business_id=$1 AND status='active'`, [bid]);
+    const { rows: att  } = await db.query(
+      `SELECT employee_id, status, COUNT(*) as days FROM attendance WHERE business_id=$1 AND TO_CHAR(date,'YYYY-MM')=$2 GROUP BY employee_id, status`,
+      [bid, cur]
+    );
+    const { rows: sal  } = await db.query(
+      `SELECT * FROM salary_records WHERE business_id=$1 AND month=$2`, [bid, cur]
+    );
+    const attMap = {};
+    att.forEach(r => {
+      if (!attMap[r.employee_id]) attMap[r.employee_id] = { present: 0, absent: 0, half: 0 };
+      attMap[r.employee_id][r.status] = parseInt(r.days);
+    });
+    const salMap = {};
+    sal.forEach(r => { salMap[r.employee_id] = r; });
+
+    const report = emps.map(e => {
+      const a   = attMap[e.id] || { present: 0, absent: 0, half: 0 };
+      const present = a.present + (a.half || 0) * 0.5;
+      const totalDays = 26;
+      const net = (e.salary / totalDays) * present;
+      const existing = salMap[e.id];
+      return { ...e, present: Math.round(present), totalDays, net: Math.round(net), salaryRecord: existing || null };
+    });
+    res.json({ month: cur, employees: report });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/payroll/process", async (req, res) => {
+  const bid = getBid(req);
+  const { employee_id, month, days_present, total_days = 26, deductions = 0 } = req.body;
+  if (!employee_id || !month) return res.status(400).json({ error: "employee_id and month required" });
+  try {
+    const { rows } = await db.query(`SELECT * FROM employees WHERE id=$1 AND business_id=$2`, [employee_id, bid]);
+    if (!rows[0]) return res.status(404).json({ error: "Employee not found" });
+    const emp = rows[0];
+    const net = Math.round((emp.salary / total_days) * days_present - deductions);
+    const id  = `sal_${Date.now()}`;
+    await db.query(
+      `INSERT INTO salary_records(id,business_id,employee_id,employee_name,month,base_salary,days_present,total_days,deductions,net_salary,paid,paid_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true,NOW())
+       ON CONFLICT(employee_id,month) DO UPDATE SET days_present=$7,deductions=$9,net_salary=$10,paid=true,paid_at=NOW()`,
+      [id, bid, employee_id, emp.name, month, emp.salary, days_present, total_days, deductions, net]
+    );
+    res.json({ ok: true, net, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BULK CATALOG IMPORT
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.post("/api/catalog/bulk-import", async (req, res) => {
+  const bid = getBid(req);
+  const { products } = req.body; // array of { name, price, category, description }
+  if (!Array.isArray(products) || !products.length) return res.status(400).json({ error: "products array required" });
+  try {
+    let imported = 0;
+    for (const p of products) {
+      if (!p.name || !p.price) continue;
+      const id = `cat_${Date.now()}_${imported}`;
+      await db.query(
+        `INSERT INTO catalog(id,business_id,name,price,category,description,in_stock,product_number)
+         VALUES($1,$2,$3,$4,$5,$6,true,$7) ON CONFLICT(id) DO NOTHING`,
+        [id, bid, p.name.trim(), Number(p.price) || 0, p.category || "general", p.description || "", p.product_number || ""]
+      );
+      imported++;
+      await new Promise(r => setTimeout(r, 5)); // small delay to avoid id collision
+    }
+    res.json({ ok: true, imported });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// AI-powered CSV/text parser → products list
+app.post("/api/catalog/parse-import", async (req, res) => {
+  if (!GROQ_API_KEY) return res.status(503).json({ error: "AI not configured" });
+  const { text, industry = "product" } = req.body;
+  if (!text) return res.status(400).json({ error: "text required" });
+  try {
+    const prompt = `Parse this product list into a JSON array. Each item should have: name, price (number), category, description.
+Industry: ${industry}. Return ONLY valid JSON array, no explanation.
+
+Input:
+${text.slice(0, 2000)}`;
+    const body = JSON.stringify({ model: "llama3-8b-8192", messages: [{ role: "user", content: prompt }], max_tokens: 800, temperature: 0.1 });
+    const https = require("https");
+    const result = await new Promise((resolve, reject) => {
+      const r = https.request(
+        { hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+        (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>{ try{resolve(JSON.parse(d))}catch{reject(new Error("parse"))} }); }
+      );
+      r.on("error", reject); r.write(body); r.end();
+    });
+    const raw = result?.choices?.[0]?.message?.content?.trim() || "[]";
+    const jsonMatch = raw.match(/\[[\s\S]*\]/);
+    const products = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    res.json({ products });
+  } catch (e) { res.status(500).json({ error: e.message, products: [] }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI SMART PRICING
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.post("/api/ai/pricing", async (req, res) => {
+  if (!GROQ_API_KEY) return res.status(503).json({ error: "AI not configured" });
+  const bid = getBid(req);
+  const { productName, currentPrice, category, industry = "product" } = req.body;
+  if (!productName) return res.status(400).json({ error: "productName required" });
+  try {
+    // Get order stats for this product
+    const { rows } = await db.query(
+      `SELECT COUNT(*) as orders, AVG((bill->>'total')::numeric) as avg_order FROM orders WHERE business_id=$1 AND cart::text ILIKE $2 AND status='delivered' AND created_at > NOW()-INTERVAL '90 days'`,
+      [bid, `%${productName}%`]
+    );
+    const stats = rows[0] || {};
+    const prompt = `You are a pricing expert for Indian small businesses. Analyze and suggest optimal pricing.
+
+Product: ${productName}
+Category: ${category || "general"}
+Industry: ${industry}
+Current Price: ₹${currentPrice || "unknown"}
+Orders in last 90 days: ${stats.orders || 0}
+Avg order value: ₹${Math.round(stats.avg_order || 0)}
+
+Give:
+1. Recommended price range (min-max)
+2. Psychological pricing tip (e.g., ₹499 vs ₹500)
+3. One actionable insight
+Keep it under 100 words, be specific.`;
+
+    const body = JSON.stringify({ model: "llama3-8b-8192", messages: [{ role: "user", content: prompt }], max_tokens: 300, temperature: 0.6 });
+    const https = require("https");
+    const result = await new Promise((resolve, reject) => {
+      const r = https.request(
+        { hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+        (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>{ try{resolve(JSON.parse(d))}catch{reject(new Error("parse"))} }); }
+      );
+      r.on("error", reject); r.write(body); r.end();
+    });
+    const text = result?.choices?.[0]?.message?.content?.trim() || "";
+    res.json({ suggestion: text, stats: { orders: parseInt(stats.orders||0), avgOrder: Math.round(stats.avg_order||0) } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // LOW STOCK ALERTS
 // ─────────────────────────────────────────────────────────────────────────────
 app.get("/api/catalog/low-stock", async (req, res) => {

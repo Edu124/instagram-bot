@@ -347,6 +347,73 @@ async function setup() {
     )
   `);
 
+  // ── expenses ──────────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id          TEXT PRIMARY KEY,
+      business_id TEXT NOT NULL DEFAULT 'default',
+      amount      NUMERIC NOT NULL DEFAULT 0,
+      category    TEXT NOT NULL DEFAULT 'general',
+      description TEXT NOT NULL DEFAULT '',
+      vendor      TEXT NOT NULL DEFAULT '',
+      date        DATE NOT NULL DEFAULT CURRENT_DATE,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS expenses_bid_idx  ON expenses(business_id)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS expenses_date_idx ON expenses(date)`);
+
+  // ── employees ─────────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS employees (
+      id          TEXT PRIMARY KEY,
+      business_id TEXT NOT NULL DEFAULT 'default',
+      name        TEXT NOT NULL DEFAULT '',
+      role        TEXT NOT NULL DEFAULT '',
+      salary      NUMERIC NOT NULL DEFAULT 0,
+      mobile      TEXT NOT NULL DEFAULT '',
+      join_date   DATE,
+      status      TEXT NOT NULL DEFAULT 'active',
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS employees_bid_idx ON employees(business_id)`);
+
+  // ── attendance ────────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS attendance (
+      id          TEXT PRIMARY KEY,
+      business_id TEXT NOT NULL DEFAULT 'default',
+      employee_id TEXT NOT NULL,
+      date        DATE NOT NULL,
+      status      TEXT NOT NULL DEFAULT 'present',
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS attendance_emp_date ON attendance(employee_id, date)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS attendance_bid_idx         ON attendance(business_id)`);
+
+  // ── salary_records ────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS salary_records (
+      id            TEXT PRIMARY KEY,
+      business_id   TEXT NOT NULL DEFAULT 'default',
+      employee_id   TEXT NOT NULL,
+      employee_name TEXT NOT NULL DEFAULT '',
+      month         TEXT NOT NULL,
+      base_salary   NUMERIC NOT NULL DEFAULT 0,
+      days_present  INTEGER NOT NULL DEFAULT 0,
+      total_days    INTEGER NOT NULL DEFAULT 26,
+      deductions    NUMERIC NOT NULL DEFAULT 0,
+      net_salary    NUMERIC NOT NULL DEFAULT 0,
+      paid          BOOLEAN NOT NULL DEFAULT false,
+      paid_at       TIMESTAMPTZ,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS salary_bid_idx ON salary_records(business_id)`);
+  await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS salary_emp_month ON salary_records(employee_id, month)`);
+
   console.log("[Setup] All tables ready ✓");
 }
 
