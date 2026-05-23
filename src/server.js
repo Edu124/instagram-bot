@@ -4237,10 +4237,11 @@ app.get("/api/catalog/low-stock", async (req, res) => {
 // GET /api/ai/status — diagnose which AI APIs are configured
 app.get("/api/ai/status", (req, res) => {
   res.json({
-    groq      : !!GROQ_API_KEY,
-    replicate : !!process.env.REPLICATE_API_TOKEN,
-    groq_hint : GROQ_API_KEY ? `${GROQ_API_KEY.slice(0, 8)}...` : "NOT SET — add GROQ_API_KEY in Railway → Variables",
-    replicate_hint: process.env.REPLICATE_API_TOKEN ? "configured" : "NOT SET — add REPLICATE_API_TOKEN for images/video",
+    groq           : !!GROQ_API_KEY,
+    replicate      : !!process.env.REPLICATE_API_TOKEN,
+    image_generate : "free (Pollinations.ai — no key needed)",
+    groq_hint      : GROQ_API_KEY ? `${GROQ_API_KEY.slice(0, 8)}...` : "NOT SET — add GROQ_API_KEY in Railway → Variables",
+    replicate_hint : process.env.REPLICATE_API_TOKEN ? "configured (used for img2img transform + video)" : "optional — needed only for Image Transform and Video generation",
   });
 });
 
@@ -4277,9 +4278,9 @@ app.post("/api/ai/generate", async (req, res) => {
 
   try {
     const body = JSON.stringify({
-      model: "llama3-8b-8192",
+      model: "llama-3.1-8b-instant",
       messages: [{ role: "user", content: systemPrompt }],
-      max_tokens: 600,
+      max_tokens: 800,
       temperature: 0.8,
     });
     const result = await new Promise((resolve, reject) => {
@@ -4300,8 +4301,12 @@ app.post("/api/ai/generate", async (req, res) => {
       reqHttp.end();
     });
     const text = result?.choices?.[0]?.message?.content?.trim() || "";
-    if (!text) return res.status(500).json({ error: "Empty AI response" });
-    res.json({ result: text, type, model: "llama3-8b-8192" });
+    if (!text) {
+      const groqErr = result?.error?.message || result?.error || JSON.stringify(result);
+      console.error("[AI generate] Groq returned no text:", groqErr);
+      return res.status(500).json({ error: groqErr || "Empty AI response. Check GROQ_API_KEY is valid." });
+    }
+    res.json({ result: text, type, model: "llama-3.1-8b-instant" });
   } catch (e) {
     console.error("[AI generate]", e.message);
     res.status(500).json({ error: e.message });
@@ -4372,61 +4377,18 @@ app.post("/api/ai/insights", async (req, res) => {
   }
 });
 
-// POST /api/ai/image — product image generation via Replicate Flux Schnell
+// POST /api/ai/image — product image generation via Pollinations.ai (free, no key needed)
 // Body: { prompt, style? }
 app.post("/api/ai/image", async (req, res) => {
-  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN || "";
-  if (!REPLICATE_TOKEN) return res.status(503).json({ error: "Image generation not configured. Set REPLICATE_API_TOKEN." });
-  const { prompt = "", style = "product photography, white background, professional" } = req.body;
+  const { prompt = "", style = "product photography, white background, professional, high quality" } = req.body;
   if (!prompt.trim()) return res.status(400).json({ error: "prompt is required" });
 
   try {
-    const https = require("https");
-    // Trigger prediction on Flux Schnell (fast & cheap ~$0.003/image)
-    const inputBody = JSON.stringify({
-      version: "black-forest-labs/flux-schnell",
-      input: { prompt: `${prompt}, ${style}`, num_outputs: 1, output_format: "webp" },
-    });
-    const prediction = await new Promise((resolve, reject) => {
-      const reqHttp = https.request(
-        { hostname: "api.replicate.com", path: "/v1/predictions", method: "POST",
-          headers: { "Authorization": `Token ${REPLICATE_TOKEN}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(inputBody) } },
-        (resp) => {
-          let data = "";
-          resp.on("data", c => data += c);
-          resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
-        }
-      );
-      reqHttp.on("error", reject);
-      reqHttp.write(inputBody);
-      reqHttp.end();
-    });
-
-    if (!prediction.id) return res.status(500).json({ error: prediction.detail || "Failed to start prediction" });
-
-    // Poll until complete (max 30s)
-    let output = null;
-    for (let i = 0; i < 15; i++) {
-      await new Promise(r => setTimeout(r, 2000));
-      const poll = await new Promise((resolve, reject) => {
-        const reqPoll = https.request(
-          { hostname: "api.replicate.com", path: `/v1/predictions/${prediction.id}`, method: "GET",
-            headers: { "Authorization": `Token ${REPLICATE_TOKEN}` } },
-          (resp) => {
-            let data = "";
-            resp.on("data", c => data += c);
-            resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
-          }
-        );
-        reqPoll.on("error", reject);
-        reqPoll.end();
-      });
-      if (poll.status === "succeeded") { output = poll.output?.[0] || null; break; }
-      if (poll.status === "failed")    { return res.status(500).json({ error: poll.error || "Generation failed" }); }
-    }
-
-    if (!output) return res.status(504).json({ error: "Image generation timed out" });
-    res.json({ imageUrl: output, prompt });
+    // Pollinations.ai — completely free, no API key, powered by FLUX
+    const fullPrompt = `${prompt.trim()}, ${style}`;
+    const seed = Math.floor(Math.random() * 999999);
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}?width=1024&height=1024&model=flux&seed=${seed}&nologo=true&enhance=true`;
+    res.json({ imageUrl, prompt, model: "flux-pollinations" });
   } catch (e) {
     console.error("[AI image]", e.message);
     res.status(500).json({ error: e.message });
@@ -4437,7 +4399,7 @@ app.post("/api/ai/image", async (req, res) => {
 // Body: { image: "data:image/jpeg;base64,...", prompt, strength? }
 app.post("/api/ai/image-transform", async (req, res) => {
   const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN || "";
-  if (!REPLICATE_TOKEN) return res.status(503).json({ error: "Image generation not configured. Set REPLICATE_API_TOKEN." });
+  if (!REPLICATE_TOKEN) return res.status(503).json({ error: "Image Transform requires Replicate credits. Add REPLICATE_API_TOKEN in Railway Variables (replicate.com → Account → API tokens). Standard text→image above is free." });
 
   const { image = "", prompt = "", strength = 0.8 } = req.body;
   if (!image) return res.status(400).json({ error: "image (base64 data URI) is required" });
