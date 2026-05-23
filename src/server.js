@@ -122,6 +122,12 @@ function _groqSystemPrompt(industry, businessName, faqContext, lang, faqOnly = f
     role = `a helpful grocery store assistant for ${businessName || "a kirana store"}. Help customers with product availability, pricing, and order queries. Be concise and practical.`;
   } else if (ind.includes("tourism") || ind.includes("travel")) {
     role = `a helpful travel consultant for ${businessName || "a travel agency"}. Help customers with tour packages, itineraries, pricing, and booking queries.`;
+  } else if (ind.includes("restaurant") || ind.includes("food") || ind.includes("cafe")) {
+    role = `a friendly restaurant assistant for ${businessName || "a restaurant"}. Help customers with the menu, today's specials, ingredients, delivery options, and table bookings. Be warm and appetizing in your tone.`;
+  } else if (ind.includes("salon") || ind.includes("spa") || ind.includes("beauty")) {
+    role = `a friendly salon & spa assistant for ${businessName || "a salon"}. Help clients with services offered, pricing, availability, appointment bookings, and aftercare tips. Be polished and professional.`;
+  } else if (ind.includes("medical") || ind.includes("pharmacy") || ind.includes("medicine")) {
+    role = `a helpful pharmacy assistant for ${businessName || "a medical store"}. Help customers with medicine availability, pricing, substitutes, and dosage information. Always recommend consulting a doctor for prescriptions. Be accurate and responsible.`;
   } else {
     role = `a helpful customer service assistant for ${businessName || "a business"}.`;
   }
@@ -682,7 +688,7 @@ async function routeMessage(customerId, sess, message, name) {
     const lang = sess.lang || "english";
     const poSettings = await getSettings(sess.businessId || DEFAULT_BUSINESS_ID);
     const poIndustry = (poSettings.industry || "").toLowerCase();
-    const skipAddress = poIndustry.includes("education") || poIndustry.includes("tourism");
+    const skipAddress = poIndustry.includes("education") || poIndustry.includes("tourism") || poIndustry.includes("salon") || poIndustry.includes("spa");
     session.update(customerId, { state: skipAddress ? "collecting_mobile" : "collecting_address" });
     const addrMsg = {
       hindi   : "📦 *Delivery address kya hai?*\n\nApna poora address likhiye (ghar no., street, city, pincode).",
@@ -4228,21 +4234,43 @@ app.get("/api/catalog/low-stock", async (req, res) => {
 // AI STUDIO ENDPOINTS  (used by AIStudioScreen in the app)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// GET /api/ai/status — diagnose which AI APIs are configured
+app.get("/api/ai/status", (req, res) => {
+  res.json({
+    groq      : !!GROQ_API_KEY,
+    replicate : !!process.env.REPLICATE_API_TOKEN,
+    groq_hint : GROQ_API_KEY ? `${GROQ_API_KEY.slice(0, 8)}...` : "NOT SET — add GROQ_API_KEY in Railway → Variables",
+    replicate_hint: process.env.REPLICATE_API_TOKEN ? "configured" : "NOT SET — add REPLICATE_API_TOKEN for images/video",
+  });
+});
+
 // POST /api/ai/generate — caption / reel script / product description writer
 // Body: { type, context, industry, businessName, tone }
-// type: "caption" | "description" | "reel_script" | "flashcard" | "quiz"
+// type: "caption" | "broadcast" | "instagram" | "reel" | "description" | "reel_script" | "flashcard" | "quiz"
 app.post("/api/ai/generate", async (req, res) => {
-  if (!GROQ_API_KEY) return res.status(503).json({ error: "AI service not configured" });
+  if (!GROQ_API_KEY) return res.status(503).json({ error: "GROQ_API_KEY not set on Railway. Add it under your service Variables and redeploy." });
   const bid = getBid(req);
   const { type = "caption", context = "", industry = "product", businessName = "", tone = "friendly" } = req.body;
   if (!context.trim()) return res.status(400).json({ error: "context is required" });
 
+  const biz = businessName || "a small business";
+  const ind = industry;
   const prompts = {
-    caption: `You are a social media expert for ${businessName || "a small business"} (${industry} industry). Write a catchy Instagram/WhatsApp caption for the following product or post context. Keep it under 150 words, use relevant emojis, include a call-to-action. Tone: ${tone}.\n\nContext: ${context}`,
-    description: `You are a product copywriter for ${businessName || "a small business"} (${industry} industry). Write a compelling product description (2-3 paragraphs) for the following product. Highlight key features, benefits and use cases. Tone: ${tone}.\n\nProduct info: ${context}`,
-    reel_script: `You are a content creator for ${businessName || "a small business"} (${industry} industry). Write a punchy 30-second Instagram Reel script. Include a hook (first 3 seconds), main content, and CTA. Format as: HOOK: / CONTENT: / CTA:. Tone: ${tone}.\n\nTopic: ${context}`,
-    flashcard: `You are an education expert. Create 5 question-answer flashcards for the following topic. Format as numbered list: Q: [question]\nA: [answer]. Keep answers concise.\n\nTopic: ${context}`,
-    quiz: `You are an education expert. Create 5 multiple-choice quiz questions for the following topic. Format: Q: [question]\nA) [option]\nB) [option]\nC) [option]\nD) [option]\nAnswer: [letter]\n\nTopic: ${context}`,
+    // Instagram / social captions
+    caption  : `You are a social media expert for ${biz} (${ind}). Write a catchy Instagram caption with emojis and 5 relevant hashtags. Under 150 words. Tone: ${tone}.\n\nContext: ${context}`,
+    instagram: `You are a social media expert for ${biz} (${ind}). Write a catchy Instagram caption with emojis and 5 relevant hashtags. Under 150 words. Tone: ${tone}.\n\nContext: ${context}`,
+    broadcast: `You are a WhatsApp marketing expert for ${biz} (${ind}). Write a warm, personal broadcast message that drives action. Under 100 words. Tone: ${tone}.\n\nContext: ${context}`,
+    // Reel scripts
+    reel        : `You are a content creator for ${biz} (${ind}). Write a 30-second Reel script with HOOK (first 3s), CONTENT, and CTA sections. Simple Hindi-English mix. Tone: ${tone}.\n\nTopic: ${context}`,
+    reel_script : `You are a content creator for ${biz} (${ind}). Write a 30-second Reel script with HOOK (first 3s), CONTENT, and CTA sections. Simple Hindi-English mix. Tone: ${tone}.\n\nTopic: ${context}`,
+    // Product descriptions
+    description: `You are a product copywriter for ${biz} (${ind}). Write a compelling product description (2-3 paragraphs) highlighting features, benefits and use cases. Tone: ${tone}.\n\nProduct: ${context}`,
+    // Education
+    flashcard: `You are an education expert. Create 8 question-answer flashcards for this topic. Return ONLY valid JSON array: [{"q":"Question?","a":"Answer"},...]. No extra text.\n\nTopic: ${context}`,
+    flashcards: `You are an education expert. Create 8 question-answer flashcards for this topic. Return ONLY valid JSON array: [{"q":"Question?","a":"Answer"},...]. No extra text.\n\nTopic: ${context}`,
+    quiz: `You are an education expert. Create 5 multiple-choice quiz questions. Format: Q: [question]\nA) [opt]\nB) [opt]\nC) [opt]\nD) [opt]\nAnswer: [letter]\n\nTopic: ${context}`,
+    // Instagram post caption (from video/image posting)
+    instagram_video: `You are a social media expert for ${biz}. Write an Instagram Reel caption with emojis and 5 hashtags for this video content. Under 100 words.\n\nContext: ${context}`,
   };
 
   const systemPrompt = prompts[type] || prompts.caption;
