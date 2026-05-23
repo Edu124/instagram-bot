@@ -109,11 +109,22 @@ function _groqSystemPrompt(industry, businessName, faqContext, lang, faqOnly = f
     ].join(" ");
   }
 
-  // ── Education / doubt mode: full teaching assistant ───────────────────────
+  // ── Industry-specific roles ───────────────────────────────────────────────
   const isEdu = ind.includes("education");
-  const role  = isEdu
-    ? `a helpful teaching assistant for ${businessName || "a coaching institute"}. Answer academic doubts clearly, solve problems step by step, and explain concepts simply.`
-    : `a helpful assistant for ${businessName || "a business"}.`;
+  let role;
+  if (isEdu) {
+    role = `a helpful teaching assistant for ${businessName || "a coaching institute"}. Answer academic doubts clearly, solve problems step by step, and explain concepts simply.`;
+  } else if (ind.includes("cake") || ind.includes("bakery")) {
+    role = `a friendly cake shop assistant for ${businessName || "a bakery"}. Help customers choose cakes, know flavours, sizes, pricing, and delivery options. Ask for details like size, flavour, message on cake, and delivery date when they order.`;
+  } else if (ind.includes("icecream") || ind.includes("ice_cream") || ind.includes("dessert")) {
+    role = `a friendly ice cream shop assistant for ${businessName || "an ice cream shop"}. Help customers choose flavours, combos, and sizes. Answer questions about today's specials, allergens, and delivery.`;
+  } else if (ind.includes("kirana") || ind.includes("grocery")) {
+    role = `a helpful grocery store assistant for ${businessName || "a kirana store"}. Help customers with product availability, pricing, and order queries. Be concise and practical.`;
+  } else if (ind.includes("tourism") || ind.includes("travel")) {
+    role = `a helpful travel consultant for ${businessName || "a travel agency"}. Help customers with tour packages, itineraries, pricing, and booking queries.`;
+  } else {
+    role = `a helpful customer service assistant for ${businessName || "a business"}.`;
+  }
 
   const faqSection = faqContext
     ? `\n\nBusiness FAQs (use if relevant):\n${faqContext}`
@@ -1066,6 +1077,18 @@ async function handleSearch(customerId, sess, message, name) {
       exampleHindi    = `"paneer pizza" या "veg thali"`;
       exampleHinglish = `"paneer pizza" ya "veg thali"`;
       exampleEnglish  = `"paneer pizza" or "veg thali"`;
+    } else if (industry.includes("cake") || industry.includes("bakery")) {
+      exampleHindi    = `"chocolate cake 1kg" या "anniversary cake with message"`;
+      exampleHinglish = `"chocolate cake 1kg" ya "custom birthday cake"`;
+      exampleEnglish  = `"chocolate cake 1kg" or "custom anniversary cake"`;
+    } else if (industry.includes("icecream") || industry.includes("ice_cream") || industry.includes("dessert")) {
+      exampleHindi    = `"chocolate ice cream" या "fruit sundae"`;
+      exampleHinglish = `"chocolate ice cream" ya "fruit sundae"`;
+      exampleEnglish  = `"chocolate ice cream" or "fruit sundae"`;
+    } else if (industry.includes("kirana") || industry.includes("grocery")) {
+      exampleHindi    = `"चावल 5kg, दाल 2kg, तेल 1L"`;
+      exampleHinglish = `"chawal 5kg, dal 2kg, tel 1L"`;
+      exampleEnglish  = `"rice 5kg, dal 2kg, oil 1L"`;
     }
 
     const greets = {
@@ -1576,7 +1599,8 @@ async function startAddressCollection(customerId, sess) {
   const industry = (settings.industry || "").toLowerCase();
 
   // Education & tourism don't need delivery address — skip to mobile collection
-  if (industry.includes("education") || industry.includes("tourism") || industry.includes("travel")) {
+  if (industry.includes("education") || industry.includes("tourism") || industry.includes("travel")
+      || industry.includes("icecream") || industry.includes("ice_cream") || industry.includes("dessert")) {
     session.update(customerId, { address: "", state: "collecting_mobile" });
     const msgs = {
       hindi   : `📱 Enrollment confirmation ke liye aapka mobile number? (10 digit)`,
