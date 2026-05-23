@@ -4405,6 +4405,79 @@ app.post("/api/ai/image", async (req, res) => {
   }
 });
 
+// POST /api/ai/image-transform — image-to-image transformation via Replicate Flux Dev
+// Body: { image: "data:image/jpeg;base64,...", prompt, strength? }
+app.post("/api/ai/image-transform", async (req, res) => {
+  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN || "";
+  if (!REPLICATE_TOKEN) return res.status(503).json({ error: "Image generation not configured. Set REPLICATE_API_TOKEN." });
+
+  const { image = "", prompt = "", strength = 0.8 } = req.body;
+  if (!image) return res.status(400).json({ error: "image (base64 data URI) is required" });
+  if (!prompt.trim()) return res.status(400).json({ error: "prompt is required" });
+
+  try {
+    const https = require("https");
+
+    // Use Flux Dev with image input for img2img transformation
+    const inputBody = JSON.stringify({
+      version: "black-forest-labs/flux-dev",
+      input: {
+        prompt           : prompt.trim(),
+        image            : image,             // data URI or URL
+        prompt_strength  : Math.min(1, Math.max(0, Number(strength) || 0.8)),
+        num_outputs      : 1,
+        num_inference_steps: 28,
+        guidance_scale   : 3.5,
+        output_format    : "webp",
+      },
+    });
+
+    const prediction = await new Promise((resolve, reject) => {
+      const reqHttp = https.request(
+        { hostname: "api.replicate.com", path: "/v1/predictions", method: "POST",
+          headers: { "Authorization": `Token ${REPLICATE_TOKEN}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(inputBody) } },
+        (resp) => {
+          let data = "";
+          resp.on("data", c => data += c);
+          resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
+        }
+      );
+      reqHttp.on("error", reject);
+      reqHttp.write(inputBody);
+      reqHttp.end();
+    });
+
+    if (!prediction.id) return res.status(500).json({ error: prediction.detail || "Failed to start prediction" });
+
+    // Poll until complete (max 60s — img2img is slower than txt2img)
+    let output = null;
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      const poll = await new Promise((resolve, reject) => {
+        const reqPoll = https.request(
+          { hostname: "api.replicate.com", path: `/v1/predictions/${prediction.id}`, method: "GET",
+            headers: { "Authorization": `Token ${REPLICATE_TOKEN}` } },
+          (resp) => {
+            let data = "";
+            resp.on("data", c => data += c);
+            resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
+          }
+        );
+        reqPoll.on("error", reject);
+        reqPoll.end();
+      });
+      if (poll.status === "succeeded") { output = poll.output?.[0] || null; break; }
+      if (poll.status === "failed")    { return res.status(500).json({ error: poll.error || "Transformation failed" }); }
+    }
+
+    if (!output) return res.status(504).json({ error: "Image transformation timed out" });
+    res.json({ imageUrl: output, prompt });
+  } catch (e) {
+    console.error("[AI image-transform]", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TEST CHAT (no WhatsApp needed — used by test-chat.html)
 // ─────────────────────────────────────────────────────────────────────────────
