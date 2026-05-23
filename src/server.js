@@ -4479,6 +4479,179 @@ app.post("/api/ai/image-transform", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AI VIDEO GENERATION via Replicate MiniMax
+// POST /api/ai/video — text-to-video (6s clip, HD)
+// Body: { prompt, first_frame_image? }
+// ─────────────────────────────────────────────────────────────────────────────
+app.post("/api/ai/video", async (req, res) => {
+  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN || "";
+  if (!REPLICATE_TOKEN) return res.status(503).json({ error: "Video generation not configured. Set REPLICATE_API_TOKEN." });
+
+  const { prompt = "", first_frame_image } = req.body;
+  if (!prompt.trim()) return res.status(400).json({ error: "prompt is required" });
+
+  try {
+    const https = require("https");
+
+    // MiniMax video-01-live: 5s HD clip from text prompt
+    const input = { prompt: prompt.trim(), num_frames: 161, fps: 24 };
+    if (first_frame_image) input.first_frame_image = first_frame_image;
+
+    const inputBody = JSON.stringify({
+      version: "minimax/video-01-live",
+      input,
+    });
+
+    const prediction = await new Promise((resolve, reject) => {
+      const reqHttp = https.request(
+        { hostname: "api.replicate.com", path: "/v1/predictions", method: "POST",
+          headers: { "Authorization": `Token ${REPLICATE_TOKEN}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(inputBody) } },
+        (resp) => {
+          let data = "";
+          resp.on("data", c => data += c);
+          resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
+        }
+      );
+      reqHttp.on("error", reject);
+      reqHttp.write(inputBody);
+      reqHttp.end();
+    });
+
+    if (!prediction.id) return res.status(500).json({ error: prediction.detail || "Failed to start video generation" });
+
+    // Poll up to 3 minutes (video gen is slow)
+    let output = null;
+    for (let i = 0; i < 45; i++) {
+      await new Promise(r => setTimeout(r, 4000));
+      const poll = await new Promise((resolve, reject) => {
+        const reqPoll = https.request(
+          { hostname: "api.replicate.com", path: `/v1/predictions/${prediction.id}`, method: "GET",
+            headers: { "Authorization": `Token ${REPLICATE_TOKEN}` } },
+          (resp) => {
+            let data = "";
+            resp.on("data", c => data += c);
+            resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
+          }
+        );
+        reqPoll.on("error", reject);
+        reqPoll.end();
+      });
+      if (poll.status === "succeeded") {
+        output = Array.isArray(poll.output) ? poll.output[0] : poll.output;
+        break;
+      }
+      if (poll.status === "failed") return res.status(500).json({ error: poll.error || "Video generation failed" });
+    }
+
+    if (!output) return res.status(504).json({ error: "Video generation timed out. Try a shorter/simpler prompt." });
+    res.json({ videoUrl: output, prompt });
+  } catch (e) {
+    console.error("[AI video]", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INSTAGRAM CONTENT PUBLISHING
+// POST /api/instagram/post — publish image or video Reel to Instagram
+// Body: { mediaUrl, caption, mediaType: "IMAGE" | "VIDEO", bid? }
+// Requires instagram_account_id + instagram_access_token in business_settings
+// ─────────────────────────────────────────────────────────────────────────────
+app.post("/api/instagram/post", async (req, res) => {
+  const bid = getBid(req);
+  const { mediaUrl, caption = "", mediaType = "IMAGE" } = req.body;
+  if (!mediaUrl) return res.status(400).json({ error: "mediaUrl is required" });
+
+  try {
+    const settings = await getSettings(bid);
+    const igUserId = settings.instagram_account_id;
+    const igToken  = settings.instagram_access_token;
+
+    if (!igUserId || !igToken) {
+      return res.status(400).json({ error: "Instagram not connected. Go to Settings → Instagram Integration and save your Account ID and Access Token." });
+    }
+
+    const https   = require("https");
+    const base    = "graph.facebook.com";
+    const version = "v21.0";
+
+    // Helper: make a Graph API call
+    function graphPost(path, params) {
+      return new Promise((resolve, reject) => {
+        const body = JSON.stringify({ ...params, access_token: igToken });
+        const reqHttp = https.request(
+          { hostname: base, path: `/${version}${path}`, method: "POST",
+            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+          (resp) => {
+            let data = "";
+            resp.on("data", c => data += c);
+            resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
+          }
+        );
+        reqHttp.on("error", reject);
+        reqHttp.write(body);
+        reqHttp.end();
+      });
+    }
+
+    function graphGet(path, params) {
+      const qs = new URLSearchParams({ ...params, access_token: igToken }).toString();
+      return new Promise((resolve, reject) => {
+        const reqHttp = https.request(
+          { hostname: base, path: `/${version}${path}?${qs}`, method: "GET" },
+          (resp) => {
+            let data = "";
+            resp.on("data", c => data += c);
+            resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
+          }
+        );
+        reqHttp.on("error", reject);
+        reqHttp.end();
+      });
+    }
+
+    let creationId;
+
+    if (mediaType === "VIDEO") {
+      // Step 1: Create Reel container
+      const container = await graphPost(`/${igUserId}/media`, {
+        video_url : mediaUrl,
+        caption   : caption,
+        media_type: "REELS",
+      });
+      if (container.error) return res.status(400).json({ error: container.error.message || "Failed to create container" });
+      creationId = container.id;
+
+      // Step 2: Poll until video is processed (up to 5 min)
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 10000));
+        const status = await graphGet(`/${creationId}`, { fields: "status_code" });
+        if (status.status_code === "FINISHED") break;
+        if (status.status_code === "ERROR") return res.status(500).json({ error: "Instagram failed to process the video" });
+      }
+    } else {
+      // Step 1: Create image container
+      const container = await graphPost(`/${igUserId}/media`, {
+        image_url: mediaUrl,
+        caption  : caption,
+      });
+      if (container.error) return res.status(400).json({ error: container.error.message || "Failed to create container" });
+      creationId = container.id;
+    }
+
+    // Step 3: Publish
+    const publish = await graphPost(`/${igUserId}/media_publish`, { creation_id: creationId });
+    if (publish.error) return res.status(400).json({ error: publish.error.message || "Failed to publish" });
+
+    console.log(`[Instagram] Posted ${mediaType} for bid=${bid}, post_id=${publish.id}`);
+    res.json({ ok: true, postId: publish.id, message: "Posted to Instagram successfully!" });
+  } catch (e) {
+    console.error("[Instagram post]", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TEST CHAT (no WhatsApp needed — used by test-chat.html)
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/test/chat", async (req, res) => {
