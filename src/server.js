@@ -89,7 +89,7 @@ setInterval(() => {
 // Build Groq system prompt — two modes:
 //  • faqOnly  (non-education): ONLY answer from owner's FAQ, no extra knowledge
 //  • doubt    (education):     Teaching assistant with full subject knowledge
-function _groqSystemPrompt(industry, businessName, faqContext, lang, faqOnly = false) {
+function _groqSystemPrompt(industry, businessName, faqContext, lang, faqOnly = false, notebookContext = "") {
   const langMap  = { hindi: "Hindi", hinglish: "Hinglish (mix of Hindi and English)", english: "English" };
   const langNote = `Reply in ${langMap[lang] || "English"} only.`;
   const ind      = (industry || "").toLowerCase();
@@ -136,21 +136,27 @@ function _groqSystemPrompt(industry, businessName, faqContext, lang, faqOnly = f
     ? `\n\nBusiness FAQs (use if relevant):\n${faqContext}`
     : "";
 
+  // Notebook context — teacher's uploaded notes (education only)
+  const notebookSection = (isEdu && notebookContext)
+    ? `\n\n📚 Teacher's Notes (use as primary reference for answers):\n${notebookContext}`
+    : "";
+
   return [
-    `You are ${role}${faqSection}`,
+    `You are ${role}${faqSection}${notebookSection}`,
     `${langNote}`,
     `Keep reply under 200 words. Be direct and clear. No unnecessary preamble.`,
     isEdu ? `If not an academic question, say: "Please contact the teacher directly."` : "",
+    (isEdu && notebookContext) ? `When answering, prefer information from the Teacher's Notes above.` : "",
   ].filter(Boolean).join(" ");
 }
 
 // ── Groq text answer ──────────────────────────────────────────────────────────
 // faqOnly=true → strict FAQ mode (max 120 tokens), false → doubt/teaching mode (max 350 tokens)
-async function groqAnswer(question, industry = "", businessName = "", faqContext = "", lang = "english", faqOnly = false) {
+async function groqAnswer(question, industry = "", businessName = "", faqContext = "", lang = "english", faqOnly = false, notebookContext = "") {
   if (!GROQ_API_KEY) return null;
   const https = require("https");
   return new Promise((resolve) => {
-    const systemPrompt = _groqSystemPrompt(industry, businessName, faqContext, lang, faqOnly);
+    const systemPrompt = _groqSystemPrompt(industry, businessName, faqContext, lang, faqOnly, notebookContext);
     const body = JSON.stringify({
       model      : "llama-3.1-8b-instant",
       messages   : [
@@ -1150,7 +1156,9 @@ async function handleSearch(customerId, sess, message, name) {
   if (shouldCallGroq) {
     try {
       console.log(`[Groq] Attempting (faqOnly=${faqOnlyMode}): "${message.slice(0,80)}"`);
-      const aiAnswer = await groqAnswer(message, qIndustry0, qSettings0.business_name || "", qFaq0, lang, faqOnlyMode);
+      // Fetch notebook context for education businesses
+      const nbCtx = isEducation ? await getNotebookContext(bizId) : "";
+      const aiAnswer = await groqAnswer(message, qIndustry0, qSettings0.business_name || "", qFaq0, lang, faqOnlyMode, nbCtx);
       if (aiAnswer) {
         _groqRecord(customerId, bizId);   // count this usage
         console.log(`[Groq] Got answer (${aiAnswer.length} chars)`);
@@ -1177,7 +1185,8 @@ async function handleSearch(customerId, sess, message, name) {
     // Skip Groq if non-education, no FAQ set, or rate limit hit
     if (GROQ_API_KEY && (isEduFall || qFaqText.length > 0) && _groqAllowed(customerId, bizId)) {
       try {
-        const aiAnswer = await groqAnswer(message, qIndustry, qSettings.business_name || "", qFaqText, lang, faqOnlyFall);
+        const nbCtxFall = isEduFall ? await getNotebookContext(bizId) : "";
+        const aiAnswer = await groqAnswer(message, qIndustry, qSettings.business_name || "", qFaqText, lang, faqOnlyFall, nbCtxFall);
         if (aiAnswer) {
           _groqRecord(customerId, bizId);  // count this usage
           const aiPrefix = {
@@ -2574,6 +2583,71 @@ app.post("/api/batches/:batchName/flashcards", async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ── AI Notebooks — save teacher notes for Groq context ───────────────────────
+// GET  /api/notebooks         → list all notebooks for this business
+// POST /api/notebooks         → save a new notebook
+// DELETE /api/notebooks/:id   → delete a notebook
+
+app.get("/api/notebooks", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    const { rows } = await db.query(
+      `SELECT id, title, subject, LEFT(content, 120) AS snippet, created_at
+       FROM notebooks WHERE business_id=$1 ORDER BY created_at DESC LIMIT 20`,
+      [bid]
+    );
+    res.json({ notebooks: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/notebooks", async (req, res) => {
+  const bid = getBid(req);
+  const { title, subject = "", content } = req.body || {};
+  if (!title?.trim()) return res.status(400).json({ error: "title required" });
+  if (!content?.trim()) return res.status(400).json({ error: "content required" });
+  try {
+    const id = require("crypto").randomUUID();
+    await db.query(
+      `INSERT INTO notebooks (id, business_id, title, subject, content) VALUES ($1,$2,$3,$4,$5)`,
+      [id, bid, title.trim(), subject.trim(), content.trim().slice(0, 3000)]
+    );
+    // Also save to Supabase for cross-service access
+    if (supabaseAdmin) {
+      await supabaseAdmin.from("notebooks").upsert({
+        id, business_id: bid, title: title.trim(), subject: subject.trim(),
+        content: content.trim().slice(0, 3000),
+      });
+    }
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete("/api/notebooks/:id", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    await db.query(`DELETE FROM notebooks WHERE id=$1 AND business_id=$2`, [req.params.id, bid]);
+    if (supabaseAdmin) {
+      await supabaseAdmin.from("notebooks").delete().eq("id", req.params.id).eq("business_id", bid);
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Helper: fetch notebook context for a business (used by groqAnswer)
+async function getNotebookContext(bizId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT title, subject, content FROM notebooks
+       WHERE business_id=$1 ORDER BY created_at DESC LIMIT 5`,
+      [bizId]
+    );
+    if (!rows.length) return "";
+    return rows.map(r =>
+      `[${r.subject ? r.subject + " — " : ""}${r.title}]\n${r.content}`
+    ).join("\n\n---\n\n");
+  } catch { return ""; }
+}
 
 // ── Assign/update a student's batch ──────────────────────────────────────────
 app.patch("/api/customers/:id/batch", async (req, res) => {
