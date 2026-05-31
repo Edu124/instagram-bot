@@ -4592,73 +4592,92 @@ app.post("/api/ai/image-transform", async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AI VIDEO GENERATION via Replicate MiniMax
-// POST /api/ai/video — text-to-video (6s clip, HD)
-// Body: { prompt, first_frame_image? }
+// POST /api/ai/video — text-to-video via Kling AI (5s HD clip)
+// Body: { prompt }
 // ─────────────────────────────────────────────────────────────────────────────
-app.post("/api/ai/video", async (req, res) => {
-  const REPLICATE_TOKEN = process.env.REPLICATE_API_TOKEN || "";
-  if (!REPLICATE_TOKEN) return res.status(503).json({ error: "Video generation not configured. Set REPLICATE_API_TOKEN." });
 
-  const { prompt = "", first_frame_image } = req.body;
+// Generate Kling JWT token (HS256) from access key + secret key
+function _klingToken() {
+  const accessKey = process.env.KLING_ACCESS_KEY || "";
+  const secretKey = process.env.KLING_SECRET_KEY || "";
+  if (!accessKey || !secretKey) return null;
+  const crypto = require("crypto");
+  const now    = Math.floor(Date.now() / 1000);
+  const header  = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ iss: accessKey, exp: now + 1800, nbf: now - 5 })).toString("base64url");
+  const sig     = crypto.createHmac("sha256", secretKey).update(`${header}.${payload}`).digest("base64url");
+  return `${header}.${payload}.${sig}`;
+}
+
+app.post("/api/ai/video", async (req, res) => {
+  const token = _klingToken();
+  if (!token) return res.status(503).json({ error: "Video generation not configured. Set KLING_ACCESS_KEY and KLING_SECRET_KEY in Railway." });
+
+  const { prompt = "" } = req.body;
   if (!prompt.trim()) return res.status(400).json({ error: "prompt is required" });
 
   try {
     const https = require("https");
 
-    // MiniMax video-01-live: 5s HD clip from text prompt
-    const input = { prompt: prompt.trim(), num_frames: 161, fps: 24 };
-    if (first_frame_image) input.first_frame_image = first_frame_image;
-
-    const inputBody = JSON.stringify({
-      version: "minimax/video-01-live",
-      input,
-    });
-
-    const prediction = await new Promise((resolve, reject) => {
-      const reqHttp = https.request(
-        { hostname: "api.replicate.com", path: "/v1/predictions", method: "POST",
-          headers: { "Authorization": `Token ${REPLICATE_TOKEN}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(inputBody) } },
+    // Helper: make HTTPS request to Kling API
+    const klingReq = (method, path, body = null) => new Promise((resolve, reject) => {
+      const headers = { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" };
+      const bodyStr = body ? JSON.stringify(body) : null;
+      if (bodyStr) headers["Content-Length"] = Buffer.byteLength(bodyStr);
+      const r = https.request(
+        { hostname: "api.klingai.com", path, method, headers },
         (resp) => {
           let data = "";
           resp.on("data", c => data += c);
           resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
         }
       );
-      reqHttp.on("error", reject);
-      reqHttp.write(inputBody);
-      reqHttp.end();
+      r.on("error", reject);
+      if (bodyStr) r.write(bodyStr);
+      r.end();
     });
 
-    if (!prediction.id) return res.status(500).json({ error: prediction.detail || "Failed to start video generation" });
+    // Step 1: Submit text-to-video task (kling-v1, standard, 5s, 16:9)
+    const submit = await klingReq("POST", "/v1/videos/text2video", {
+      model        : "kling-v1",
+      prompt       : prompt.trim(),
+      negative_prompt: "blurry, low quality, distorted, watermark",
+      cfg_scale    : 0.5,
+      mode         : "std",
+      duration     : "5",
+      aspect_ratio : "16:9",
+    });
 
-    // Poll up to 3 minutes (video gen is slow)
-    let output = null;
-    for (let i = 0; i < 45; i++) {
-      await new Promise(r => setTimeout(r, 4000));
-      const poll = await new Promise((resolve, reject) => {
-        const reqPoll = https.request(
-          { hostname: "api.replicate.com", path: `/v1/predictions/${prediction.id}`, method: "GET",
-            headers: { "Authorization": `Token ${REPLICATE_TOKEN}` } },
-          (resp) => {
-            let data = "";
-            resp.on("data", c => data += c);
-            resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
-          }
-        );
-        reqPoll.on("error", reject);
-        reqPoll.end();
-      });
-      if (poll.status === "succeeded") {
-        output = Array.isArray(poll.output) ? poll.output[0] : poll.output;
-        break;
-      }
-      if (poll.status === "failed") return res.status(500).json({ error: poll.error || "Video generation failed" });
+    const taskId = submit?.data?.task_id;
+    if (!taskId) {
+      console.error("[Kling] Submit failed:", JSON.stringify(submit));
+      return res.status(500).json({ error: submit?.message || "Failed to start video generation" });
     }
 
-    if (!output) return res.status(504).json({ error: "Video generation timed out. Try a shorter/simpler prompt." });
-    res.json({ videoUrl: output, prompt });
+    console.log(`[Kling] Task started: ${taskId}`);
+
+    // Step 2: Poll until complete (up to 4 minutes)
+    let videoUrl = null;
+    for (let i = 0; i < 48; i++) {
+      await new Promise(r => setTimeout(r, 5000)); // wait 5s between polls
+      const poll = await klingReq("GET", `/v1/videos/text2video/${taskId}`);
+      const status = poll?.data?.task_status;
+      console.log(`[Kling] Poll ${i + 1}: ${status}`);
+
+      if (status === "succeed") {
+        videoUrl = poll?.data?.task_result?.videos?.[0]?.url || null;
+        break;
+      }
+      if (status === "failed") {
+        return res.status(500).json({ error: poll?.data?.task_status_msg || "Video generation failed" });
+      }
+      // statuses: submitted, processing, succeed, failed
+    }
+
+    if (!videoUrl) return res.status(504).json({ error: "Video generation timed out. Try a shorter/simpler prompt." });
+    res.json({ videoUrl, prompt });
   } catch (e) {
-    console.error("[AI video]", e.message);
+    console.error("[Kling video]", e.message);
     res.status(500).json({ error: e.message });
   }
 });
