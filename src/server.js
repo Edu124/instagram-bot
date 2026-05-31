@@ -4601,12 +4601,13 @@ function _klingToken() {
   const accessKey = process.env.KLING_ACCESS_KEY || "";
   const secretKey = process.env.KLING_SECRET_KEY || "";
   if (!accessKey || !secretKey) return null;
-  const crypto = require("crypto");
-  const now    = Math.floor(Date.now() / 1000);
-  const header  = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
-  const payload = Buffer.from(JSON.stringify({ iss: accessKey, exp: now + 1800, nbf: now - 5 })).toString("base64url");
-  const sig     = crypto.createHmac("sha256", secretKey).update(`${header}.${payload}`).digest("base64url");
-  return `${header}.${payload}.${sig}`;
+  const jwt = require("jsonwebtoken");
+  const now = Math.floor(Date.now() / 1000);
+  return jwt.sign(
+    { iss: accessKey, exp: now + 1800, nbf: now - 5 },
+    secretKey,
+    { algorithm: "HS256", header: { alg: "HS256", typ: "JWT" } }
+  );
 }
 
 app.post("/api/ai/video", async (req, res) => {
