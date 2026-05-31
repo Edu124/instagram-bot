@@ -2527,6 +2527,54 @@ app.get("/api/batches", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Send flashcards to all students in a batch via WhatsApp ──────────────────
+app.post("/api/batches/:batchName/flashcards", async (req, res) => {
+  const bid       = getBid(req);
+  const batchName = decodeURIComponent(req.params.batchName);
+  const { cards, topic } = req.body || {};
+  if (!Array.isArray(cards) || cards.length === 0)
+    return res.status(400).json({ error: "cards array required" });
+  try {
+    // Get all students in this batch
+    const { rows: students } = await db.query(
+      `SELECT id, name FROM bot_customers WHERE business_id=$1 AND batch=$2`,
+      [bid, batchName]
+    );
+    if (students.length === 0)
+      return res.status(404).json({ error: `No students found in batch "${batchName}"` });
+
+    // Get WhatsApp credentials for this business
+    const numInfo = await waNumbers.getByBusinessId(bid);
+    const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
+    const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
+    if (!phoneId || !token)
+      return res.status(503).json({ error: "WhatsApp not configured for this business" });
+
+    // Build message — one message with all cards
+    const header   = `🃏 *Flashcards: ${topic || batchName}*\n${"─".repeat(22)}\n\n`;
+    const cardText = cards.map((c, i) => `*Q${i + 1}:* ${c.q}\n📖 *A:* ${c.a}`).join("\n\n");
+    const footer   = `\n\n_Sent by your teacher • Study well! 💪_`;
+    const message  = header + cardText + footer;
+
+    // Send to each student (continue on individual failures)
+    let sent = 0;
+    for (const student of students) {
+      try {
+        let num = student.id.replace(/[^0-9]/g, "");
+        if (num.length === 10) num = "91" + num;
+        await wa.send(num, message, phoneId, token);
+        sent++;
+      } catch (e) {
+        console.warn(`[Flashcard] Failed → ${student.name}:`, e.message);
+      }
+    }
+    res.json({ ok: true, sent, total: students.length });
+  } catch (e) {
+    console.error("[Flashcard] batch send error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Assign/update a student's batch ──────────────────────────────────────────
 app.patch("/api/customers/:id/batch", async (req, res) => {
   const bid   = getBid(req);
