@@ -3128,6 +3128,7 @@ app.post("/api/promote/image", async (req, res) => {
       console.warn(`[ImageBlast] Failed ${c.id}:`, e.message);
     }
   }
+  logBroadcast(bid, "image", caption || "Image broadcast", sent);
   res.json({ ok: true, sent, total: targets.length });
 });
 
@@ -4554,6 +4555,145 @@ app.post("/api/ai/generate", async (req, res) => {
   }
 });
 
+// ── Broadcast log helper (fire-and-forget, won't crash callers) ───────────────
+async function logBroadcast(bid, type, preview, recipientCount) {
+  try {
+    const id = require("crypto").randomUUID();
+    await db.query(
+      `INSERT INTO broadcast_logs (id, business_id, type, message_preview, recipient_count)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [id, bid, type, (preview || "").slice(0, 150), recipientCount || 0]
+    );
+  } catch (e) { console.warn("[broadcast log]", e.message); }
+}
+
+// GET /api/ai/engagement — WhatsApp student engagement stats
+app.get("/api/ai/engagement", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    const nowMs  = Date.now();
+    const week7  = nowMs - 7  * 24 * 60 * 60 * 1000;
+    const week4  = nowMs - 30 * 24 * 60 * 60 * 1000;
+    const [totalR, active7R, active30R, broadcastR] = await Promise.all([
+      db.query(`SELECT COUNT(*) as cnt FROM bot_customers
+                WHERE (business_id=$1 OR business_id='default')`, [bid]),
+      db.query(`SELECT COUNT(*) as cnt FROM bot_customers
+                WHERE (business_id=$1 OR business_id='default')
+                AND last_active_at > $2`, [bid, week7]),
+      db.query(`SELECT COUNT(*) as cnt FROM bot_customers
+                WHERE (business_id=$1 OR business_id='default')
+                AND last_active_at > $2`, [bid, week4]),
+      db.query(`SELECT id, type, message_preview, recipient_count, reply_count, sent_at
+                FROM broadcast_logs WHERE business_id=$1
+                ORDER BY sent_at DESC LIMIT 10`, [bid]),
+    ]);
+
+    const total    = parseInt(totalR.rows[0]?.cnt  || 0);
+    const active7  = parseInt(active7R.rows[0]?.cnt || 0);
+    const active30 = parseInt(active30R.rows[0]?.cnt || 0);
+    const inactive = Math.max(0, total - active30);
+
+    // AI tip for inactive students
+    let tip = null;
+    if (GROQ_API_KEY && total > 0) {
+      const inactiveRate = Math.round((inactive / total) * 100);
+      if (inactiveRate > 30) {
+        const prompt = `${inactiveRate}% of your ${total} students haven't interacted in 30 days. Give 2 short WhatsApp message ideas (under 30 words each) to re-engage them. Return as JSON array: [{"title":"...","message":"..."},...]`;
+        try {
+          const groq  = require("groq-sdk");
+          const gc    = new groq({ apiKey: GROQ_API_KEY });
+          const resp  = await gc.chat.completions.create({
+            model: "llama-3.1-8b-instant",
+            messages: [{ role: "user", content: prompt }],
+            max_tokens: 300, temperature: 0.5,
+          });
+          const raw = resp.choices?.[0]?.message?.content || "";
+          const arr = JSON.parse(raw.substring(raw.indexOf("["), raw.lastIndexOf("]") + 1));
+          tip = arr;
+        } catch {}
+      }
+    }
+
+    res.json({
+      students: { total, active7, active30, inactive,
+        rate7: total > 0 ? Math.round((active7 / total) * 100) : 0,
+        rate30: total > 0 ? Math.round((active30 / total) * 100) : 0,
+      },
+      broadcasts: broadcastR.rows,
+      reengageTip: tip,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/ai/instagram-insights — fetch recent post metrics + AI suggestions
+app.get("/api/ai/instagram-insights", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    const settings = await getSettings(bid);
+    const igToken  = (settings.instagram_access_token || "").trim();
+    const igUserId = (settings.instagram_account_id   || "").trim();
+    if (!igToken || !igUserId) return res.json({ connected: false });
+
+    const ver = "v21.0";
+    const gGet = (path, params = {}) => {
+      const qs = new URLSearchParams({ ...params, access_token: igToken }).toString();
+      return fetch(`https://graph.facebook.com/${ver}${path}?${qs}`).then(r => r.json());
+    };
+
+    // Fetch last 10 media
+    const media = await gGet(`/${igUserId}/media`, {
+      fields: "id,media_type,timestamp,like_count,comments_count,permalink",
+      limit: "10",
+    });
+    if (media.error) return res.json({ connected: true, error: media.error.message, posts: [] });
+
+    // Fetch insights for each post
+    const posts = [];
+    for (const post of (media.data || []).slice(0, 8)) {
+      try {
+        const ins = await gGet(`/${post.id}/insights`, { metric: "impressions,reach,saved" });
+        const m   = {};
+        for (const i of (ins.data || [])) m[i.name] = i.values?.[0]?.value || 0;
+        posts.push({
+          id: post.id, type: post.media_type,
+          date: post.timestamp?.slice(0, 10) || "",
+          likes: post.like_count || 0,
+          comments: post.comments_count || 0,
+          impressions: m.impressions || 0,
+          reach: m.reach || 0,
+          saved: m.saved || 0,
+          permalink: post.permalink || "",
+          engagementRate: m.reach > 0
+            ? (((post.like_count || 0) + (post.comments_count || 0)) / m.reach * 100).toFixed(1)
+            : "0",
+        });
+      } catch {}
+    }
+
+    // AI analysis
+    let suggestions = "";
+    if (GROQ_API_KEY && posts.length > 0) {
+      const summary = posts.map((p, i) =>
+        `Post ${i+1} (${p.type}, ${p.date}): reach=${p.reach}, impressions=${p.impressions}, likes=${p.likes}, comments=${p.comments}, saved=${p.saved}, engagement=${p.engagementRate}%`
+      ).join("\n");
+      try {
+        const gc   = new (require("groq-sdk"))({ apiKey: GROQ_API_KEY });
+        const resp = await gc.chat.completions.create({
+          model: "llama-3.1-8b-instant",
+          messages: [{
+            role: "user",
+            content: `You are a social media expert for a small education business. Analyze these Instagram metrics and give 3 specific actionable suggestions to improve engagement. Be direct and practical.\n\n${summary}`,
+          }],
+          max_tokens: 400, temperature: 0.5,
+        });
+        suggestions = resp.choices?.[0]?.message?.content?.trim() || "";
+      } catch {}
+    }
+
+    res.json({ connected: true, posts, suggestions });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // POST /api/ai/insights — smart business insights from stats
 // Body: { period? }  — uses business_id from query/header
 app.post("/api/ai/insights", async (req, res) => {
@@ -4896,6 +5036,13 @@ app.post("/api/instagram/post", async (req, res) => {
     if (publish.error) return res.status(400).json({ error: publish.error.message || "Failed to publish" });
 
     console.log(`[Instagram] Posted ${mediaType} for bid=${bid}, post_id=${publish.id}`);
+    // Log post for insights tracking
+    try {
+      await db.query(
+        `INSERT INTO instagram_posts (business_id, media_id, media_type, caption) VALUES ($1,$2,$3,$4)`,
+        [bid, publish.id, mediaType, (caption || "").slice(0, 500)]
+      );
+    } catch {}
     res.json({ ok: true, postId: publish.id, message: "Posted to Instagram successfully!" });
   } catch (e) {
     console.error("[Instagram post]", e.message);
