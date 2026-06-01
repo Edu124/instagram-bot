@@ -1128,6 +1128,40 @@ async function handleSearch(customerId, sess, message, name) {
     }
   }
 
+  // ── Demo video request (education only) ──────────────────────────────────────
+  const isDemoRequest = isEducation &&
+    /\b(demo|demo class|demo video|free class|trial class|sample class|demo lecture|demo session|preview|free lecture|dekh|dekhna|sample video)\b/i.test(message);
+
+  if (isDemoRequest) {
+    try {
+      const { rows: demoRows } = await db.query(
+        `SELECT title, description, url, subject FROM demo_videos
+         WHERE business_id=$1 ORDER BY created_at DESC LIMIT 5`,
+        [bizId]
+      );
+      if (demoRows.length > 0) {
+        const demoList = demoRows.map((v, i) =>
+          `${i + 1}. *${v.title}*${v.subject ? ` (${v.subject})` : ""}${v.description ? `\n   ${v.description}` : ""}\n   🔗 ${v.url}`
+        ).join("\n\n");
+        const demoMsg = {
+          hindi   : `🎓 *हमारे Demo Videos:*\n\n${demoList}\n\n_इन्हें देखकर course के बारे में जानें!_`,
+          hinglish: `🎓 *Hamare Demo Videos:*\n\n${demoList}\n\n_Watch karo aur decide karo!_`,
+          english : `🎓 *Our Demo Videos:*\n\n${demoList}\n\n_Watch to know more about our courses!_`,
+        };
+        return send(customerId, demoMsg[lang] || demoMsg.english);
+      } else {
+        const noDemo = {
+          hindi   : "अभी कोई demo video उपलब्ध नहीं है। सीधे हमसे संपर्क करें! 📞",
+          hinglish: "Abhi koi demo video available nahi hai. Directly contact karo! 📞",
+          english : "No demo videos available right now. Please contact us directly! 📞",
+        };
+        return send(customerId, noDemo[lang] || noDemo.english);
+      }
+    } catch (e) {
+      console.warn("[Demo] Error fetching videos:", e.message);
+    }
+  }
+
   // ── Groq FAQ/doubt check — runs BEFORE intent extraction ─────────────────────
   // Catches: academic doubts, FAQ questions, policy/delivery/timing queries etc.
   const qSettings0 = await getSettings(bizId);
@@ -1145,9 +1179,41 @@ async function handleSearch(customerId, sess, message, name) {
     || /\?/.test(message);
 
   const isEducation = qIndustry0.includes("education");
+
+  // ── Education: only serve AI to active students ────────────────────────────
+  // Check if this student is in the client's student list with an active status.
+  // Active statuses: active, confirmed, in_progress (legacy), fee_due (still studying).
+  // Enquiry-only or dropped students don't get AI responses.
+  let isActiveStudent = true; // default true for non-education
+  if (isEducation) {
+    try {
+      const { rows: studentRows } = await db.query(
+        `SELECT status FROM orders
+         WHERE customer_id=$1 AND business_id=$2
+         AND status IN ('active','confirmed','in_progress','fee_due','on_hold')
+         LIMIT 1`,
+        [customerId, bizId]
+      );
+      // Also check if manually added to bot_customers (offline admission)
+      if (studentRows.length === 0) {
+        const { rows: custRows } = await db.query(
+          `SELECT id FROM bot_customers
+           WHERE id=$1 AND (business_id=$2 OR business_id='default')
+           LIMIT 1`,
+          [customerId, bizId]
+        );
+        // If in customers list (manually added), treat as active
+        isActiveStudent = custRows.length > 0;
+      } else {
+        isActiveStudent = true;
+      }
+    } catch { isActiveStudent = true; } // fail open
+  }
+
   // For non-education: only call Groq if owner has set FAQ text (saves tokens)
-  // For education: always call Groq for doubts/questions
-  const shouldCallGroq = isDoubtMsg && GROQ_API_KEY && (isEducation || qFaq0.length > 0) && _groqAllowed(customerId, bizId);
+  // For education: only call Groq for active students
+  const shouldCallGroq = isDoubtMsg && GROQ_API_KEY && isActiveStudent &&
+    (isEducation || qFaq0.length > 0) && _groqAllowed(customerId, bizId);
   // faqOnly mode: non-education industries that have FAQ text → strict FAQ-only answer
   const faqOnlyMode = !isEducation && qFaq0.length > 0;
 
@@ -2527,9 +2593,11 @@ app.get ("/api/customers/:id",   async (req, res) => {
 app.get("/api/batches", async (req, res) => {
   const bid = getBid(req);
   try {
+    // Match exact business_id OR 'default' fallback (handles legacy rows)
     const { rows } = await db.query(
       `SELECT DISTINCT batch FROM bot_customers
-       WHERE business_id=$1 AND batch != '' ORDER BY batch ASC`,
+       WHERE (business_id=$1 OR business_id='default') AND batch IS NOT NULL AND batch != ''
+       ORDER BY batch ASC`,
       [bid]
     );
     res.json({ batches: rows.map(r => r.batch) });
@@ -2582,6 +2650,57 @@ app.post("/api/batches/:batchName/flashcards", async (req, res) => {
     console.error("[Flashcard] batch send error:", e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── Demo Videos ───────────────────────────────────────────────────────────────
+// Teachers add demo lecture links. Bot sends them when students ask for demos.
+// GET  /api/demo-videos        → list all demo videos for this business
+// POST /api/demo-videos        → add a demo video
+// DELETE /api/demo-videos/:id  → remove a demo video
+
+app.get("/api/demo-videos", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    const { rows } = await db.query(
+      `SELECT id, title, description, url, subject, created_at
+       FROM demo_videos WHERE business_id=$1 ORDER BY created_at DESC LIMIT 50`,
+      [bid]
+    );
+    res.json({ videos: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/demo-videos", async (req, res) => {
+  const bid = getBid(req);
+  const { title, url, description = "", subject = "" } = req.body || {};
+  if (!title?.trim()) return res.status(400).json({ error: "title required" });
+  if (!url?.trim())   return res.status(400).json({ error: "url required" });
+  try {
+    const id = require("crypto").randomUUID();
+    await db.query(
+      `INSERT INTO demo_videos (id, business_id, title, description, url, subject)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [id, bid, title.trim(), description.trim(), url.trim(), subject.trim()]
+    );
+    if (supabaseAdmin) {
+      await supabaseAdmin.from("demo_videos").upsert({
+        id, business_id: bid, title: title.trim(),
+        description: description.trim(), url: url.trim(), subject: subject.trim(),
+      });
+    }
+    res.json({ ok: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete("/api/demo-videos/:id", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    await db.query(`DELETE FROM demo_videos WHERE id=$1 AND business_id=$2`, [req.params.id, bid]);
+    if (supabaseAdmin) {
+      await supabaseAdmin.from("demo_videos").delete().eq("id", req.params.id).eq("business_id", bid);
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── AI Notebooks — save teacher notes for Groq context ───────────────────────
@@ -4651,8 +4770,9 @@ app.post("/api/ai/video", async (req, res) => {
 
     const taskId = submit?.data?.task_id;
     if (!taskId) {
-      console.error("[Kling] Submit failed:", JSON.stringify(submit));
-      return res.status(500).json({ error: submit?.message || "Failed to start video generation" });
+      console.error("[Kling] Submit failed — full response:", JSON.stringify(submit));
+      const errMsg = submit?.message || submit?.error || submit?.code || "Failed to start video generation";
+      return res.status(500).json({ error: `Kling: ${errMsg}`, detail: submit });
     }
 
     console.log(`[Kling] Task started: ${taskId}`);
