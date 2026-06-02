@@ -4851,94 +4851,70 @@ app.post("/api/ai/image-transform", async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AI VIDEO GENERATION via Replicate MiniMax
-// POST /api/ai/video — text-to-video via Kling AI (5s HD clip)
+// POST /api/ai/video — text-to-video via fal.ai (Luma Dream Machine, 5s HD)
 // Body: { prompt }
+// Uses FAL_KEY env var — simple API key auth, no JWT needed
 // ─────────────────────────────────────────────────────────────────────────────
-
-// Generate Kling JWT token (HS256) from access key + secret key
-function _klingToken() {
-  const accessKey = process.env.KLING_ACCESS_KEY || "";
-  const secretKey = process.env.KLING_SECRET_KEY || "";
-  if (!accessKey || !secretKey) return null;
-  const jwt = require("jsonwebtoken");
-  const now = Math.floor(Date.now() / 1000);
-  return jwt.sign(
-    { iss: accessKey, exp: now + 1800, nbf: now - 5 },
-    secretKey,
-    { algorithm: "HS256", header: { alg: "HS256", typ: "JWT" } }
-  );
-}
-
 app.post("/api/ai/video", async (req, res) => {
-  const token = _klingToken();
-  if (!token) return res.status(503).json({ error: "Video generation not configured. Set KLING_ACCESS_KEY and KLING_SECRET_KEY in Railway." });
+  const FAL_KEY = process.env.FAL_KEY || "";
+  if (!FAL_KEY) return res.status(503).json({ error: "Video generation not configured. Set FAL_KEY in Railway." });
 
   const { prompt = "" } = req.body;
   if (!prompt.trim()) return res.status(400).json({ error: "prompt is required" });
 
   try {
-    const https = require("https");
+    const FAL_MODEL  = "fal-ai/luma-dream-machine";
+    const FAL_BASE   = "https://queue.fal.run";
+    const authHeader = { "Authorization": `Key ${FAL_KEY}`, "Content-Type": "application/json" };
 
-    // Helper: make HTTPS request to Kling API
-    const klingReq = (method, path, body = null) => new Promise((resolve, reject) => {
-      const headers = { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" };
-      const bodyStr = body ? JSON.stringify(body) : null;
-      if (bodyStr) headers["Content-Length"] = Buffer.byteLength(bodyStr);
-      const r = https.request(
-        { hostname: "api.klingai.com", path, method, headers },
-        (resp) => {
-          let data = "";
-          resp.on("data", c => data += c);
-          resp.on("end", () => { try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); } });
-        }
-      );
-      r.on("error", reject);
-      if (bodyStr) r.write(bodyStr);
-      r.end();
+    // Step 1: Submit job to fal.ai queue
+    const submitRes = await fetch(`${FAL_BASE}/${FAL_MODEL}`, {
+      method : "POST",
+      headers: authHeader,
+      body   : JSON.stringify({
+        prompt      : prompt.trim(),
+        loop        : false,
+        duration    : "5s",
+        aspect_ratio: "16:9",
+      }),
     });
+    const submitData = await submitRes.json();
+    const requestId  = submitData?.request_id;
 
-    // Step 1: Submit text-to-video task (kling-v1, standard, 5s, 16:9)
-    const submit = await klingReq("POST", "/v1/videos/text2video", {
-      model        : "kling-v1",
-      prompt       : prompt.trim(),
-      negative_prompt: "blurry, low quality, distorted, watermark",
-      cfg_scale    : 0.5,
-      mode         : "std",
-      duration     : "5",
-      aspect_ratio : "16:9",
-    });
-
-    const taskId = submit?.data?.task_id;
-    if (!taskId) {
-      console.error("[Kling] Submit failed — full response:", JSON.stringify(submit));
-      const errMsg = submit?.message || submit?.error || submit?.code || "Failed to start video generation";
-      return res.status(500).json({ error: `Kling: ${errMsg}`, detail: submit });
+    if (!requestId) {
+      console.error("[fal.ai] Submit failed:", JSON.stringify(submitData));
+      return res.status(500).json({ error: submitData?.detail || submitData?.error || "Failed to start video generation" });
     }
 
-    console.log(`[Kling] Task started: ${taskId}`);
+    console.log(`[fal.ai] Job submitted: ${requestId}`);
 
-    // Step 2: Poll until complete (up to 4 minutes)
+    // Step 2: Poll status until COMPLETED (up to 4 min)
     let videoUrl = null;
     for (let i = 0; i < 48; i++) {
-      await new Promise(r => setTimeout(r, 5000)); // wait 5s between polls
-      const poll = await klingReq("GET", `/v1/videos/text2video/${taskId}`);
-      const status = poll?.data?.task_status;
-      console.log(`[Kling] Poll ${i + 1}: ${status}`);
+      await new Promise(r => setTimeout(r, 5000));
+      const statusRes  = await fetch(`${FAL_BASE}/${FAL_MODEL}/requests/${requestId}/status`, { headers: authHeader });
+      const statusData = await statusRes.json();
+      const status     = statusData?.status;
+      console.log(`[fal.ai] Poll ${i + 1}: ${status}`);
 
-      if (status === "succeed") {
-        videoUrl = poll?.data?.task_result?.videos?.[0]?.url || null;
+      if (status === "COMPLETED") {
+        // Fetch the result
+        const resultRes  = await fetch(`${FAL_BASE}/${FAL_MODEL}/requests/${requestId}`, { headers: authHeader });
+        const resultData = await resultRes.json();
+        videoUrl = resultData?.video?.url || resultData?.output?.video?.url || null;
         break;
       }
-      if (status === "failed") {
-        return res.status(500).json({ error: poll?.data?.task_status_msg || "Video generation failed" });
+      if (status === "FAILED") {
+        return res.status(500).json({ error: statusData?.error || "Video generation failed" });
       }
-      // statuses: submitted, processing, succeed, failed
+      // statuses: IN_QUEUE, IN_PROGRESS, COMPLETED, FAILED
     }
 
     if (!videoUrl) return res.status(504).json({ error: "Video generation timed out. Try a shorter/simpler prompt." });
+    console.log(`[fal.ai] Done: ${videoUrl}`);
     res.json({ videoUrl, prompt });
   } catch (e) {
-    console.error("[Kling video]", e.message);
+    console.error("[fal.ai video]", e.message);
     res.status(500).json({ error: e.message });
   }
 });
