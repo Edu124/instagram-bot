@@ -2614,7 +2614,7 @@ app.post("/api/batches/:batchName/flashcards", async (req, res) => {
   try {
     // Get all students in this batch
     const { rows: students } = await db.query(
-      `SELECT id, name FROM bot_customers WHERE business_id=$1 AND batch=$2`,
+      `SELECT id, name FROM bot_customers WHERE (business_id=$1 OR business_id='default') AND batch=$2`,
       [bid, batchName]
     );
     if (students.length === 0)
@@ -2774,7 +2774,7 @@ app.patch("/api/customers/:id/batch", async (req, res) => {
   const { batch = "" } = req.body;
   try {
     await db.query(
-      `UPDATE bot_customers SET batch=$1 WHERE id=$2 AND business_id=$3`,
+      `UPDATE bot_customers SET batch=$1 WHERE id=$2 AND (business_id=$3 OR business_id='default')`,
       [batch.trim(), req.params.id, bid]
     );
     // Also sync to Supabase so the app's direct queries see it
