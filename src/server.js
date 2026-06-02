@@ -2604,6 +2604,94 @@ app.get("/api/batches", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Flashcard Sets — save & serve as web page ────────────────────────────────
+// POST /api/flashcard-sets     → save cards, return shareable URL
+// GET  /flashcards/:id         → render interactive flip card web page
+
+app.post("/api/flashcard-sets", async (req, res) => {
+  const bid = getBid(req);
+  const { topic, cards } = req.body || {};
+  if (!topic?.trim() || !Array.isArray(cards) || cards.length === 0)
+    return res.status(400).json({ error: "topic and cards required" });
+  try {
+    const id  = require("crypto").randomBytes(8).toString("hex"); // short unique ID
+    await db.query(
+      `INSERT INTO flashcard_sets (id, business_id, topic, cards)
+       VALUES ($1, $2, $3, $4)`,
+      [id, bid, topic.trim(), JSON.stringify(cards)]
+    );
+    const BASE_URL = (process.env.BASE_URL || "https://instagram-bot-production-04ae.up.railway.app").replace(/\/$/, "");
+    res.json({ ok: true, id, url: `${BASE_URL}/flashcards/${id}` });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/flashcards/:id", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT topic, cards FROM flashcard_sets WHERE id=$1 AND expires_at > NOW()`,
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).send("<h2>Flashcard set not found or expired.</h2>");
+    const { topic, cards } = rows[0];
+    const cardArr = Array.isArray(cards) ? cards : JSON.parse(cards);
+
+    const cardHTML = cardArr.map((c, i) => `
+      <div class="card" onclick="this.classList.toggle('flipped')">
+        <div class="card-inner">
+          <div class="front">
+            <span class="num">Card ${i + 1}</span>
+            <p>${c.q}</p>
+            <span class="hint">Tap to reveal answer 👆</span>
+          </div>
+          <div class="back">
+            <span class="num">Answer</span>
+            <p>${c.a}</p>
+            <span class="hint">Tap to see question 🔄</span>
+          </div>
+        </div>
+      </div>`).join("");
+
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${topic} — Flashcards</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0a0a0f;color:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;padding:20px}
+  .header{text-align:center;padding:24px 16px 12px}
+  .header h1{font-size:22px;font-weight:700;color:#fff;margin-bottom:6px}
+  .header p{font-size:13px;color:#94a3b8}
+  .badge{display:inline-block;background:rgba(124,58,237,0.2);color:#a78bfa;border:1px solid rgba(124,58,237,0.4);border-radius:20px;padding:4px 14px;font-size:12px;font-weight:600;margin-bottom:16px}
+  .grid{display:grid;grid-template-columns:1fr;gap:14px;max-width:480px;margin:0 auto;padding-bottom:40px}
+  .card{perspective:1000px;cursor:pointer;height:160px}
+  .card-inner{position:relative;width:100%;height:100%;transition:transform 0.5s;transform-style:preserve-3d}
+  .card.flipped .card-inner{transform:rotateY(180deg)}
+  .front,.back{position:absolute;width:100%;height:100%;backface-visibility:hidden;border-radius:16px;padding:20px;display:flex;flex-direction:column;justify-content:space-between}
+  .front{background:#1e1b4b;border:1px solid rgba(124,58,237,0.4)}
+  .back{background:#0f2218;border:1px solid rgba(34,197,94,0.4);transform:rotateY(180deg)}
+  .num{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#94a3b8}
+  .front p{font-size:15px;font-weight:600;color:#e2e8f0;line-height:1.5;flex:1;display:flex;align-items:center}
+  .back p{font-size:14px;color:#bbf7d0;line-height:1.5;flex:1;display:flex;align-items:center}
+  .hint{font-size:11px;color:#64748b;text-align:center}
+  .footer{text-align:center;padding:16px;font-size:12px;color:#475569}
+  .footer span{color:#7c3aed;font-weight:600}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="badge">🃏 Flashcards</div>
+  <h1>${topic}</h1>
+  <p>${cardArr.length} cards • Tap each card to flip</p>
+</div>
+<div class="grid">${cardHTML}</div>
+<div class="footer">Shared via <span>Selly</span> — Your AI Teaching Assistant</div>
+</body>
+</html>`);
+  } catch (e) { res.status(500).send("Error loading flashcards"); }
+});
+
 // ── Send flashcards to all students in a batch via WhatsApp ──────────────────
 app.post("/api/batches/:batchName/flashcards", async (req, res) => {
   const bid       = getBid(req);
@@ -2627,11 +2715,21 @@ app.post("/api/batches/:batchName/flashcards", async (req, res) => {
     if (!phoneId || !token)
       return res.status(503).json({ error: "WhatsApp not configured for this business" });
 
-    // Build message — one message with all cards
-    const header   = `🃏 *Flashcards: ${topic || batchName}*\n${"─".repeat(22)}\n\n`;
-    const cardText = cards.map((c, i) => `*Q${i + 1}:* ${c.q}\n📖 *A:* ${c.a}`).join("\n\n");
-    const footer   = `\n\n_Sent by your teacher • Study well! 💪_`;
-    const message  = header + cardText + footer;
+    // Save flashcard set and generate shareable web link
+    const setId  = require("crypto").randomBytes(8).toString("hex");
+    await db.query(
+      `INSERT INTO flashcard_sets (id, business_id, topic, cards) VALUES ($1,$2,$3,$4)`,
+      [setId, bid, topic || batchName, JSON.stringify(cards)]
+    ).catch(() => {}); // non-fatal if table doesn't exist yet
+    const BASE_URL = (process.env.BASE_URL || "https://instagram-bot-production-04ae.up.railway.app").replace(/\/$/, "");
+    const flashUrl = `${BASE_URL}/flashcards/${setId}`;
+
+    // Build WhatsApp message with link
+    const message = `🃏 *Flashcards: ${topic || batchName}*\n\n` +
+      `Your teacher has shared *${cards.length} flashcards* with you!\n\n` +
+      `👆 Tap the link below to study with interactive flip cards:\n` +
+      `${flashUrl}\n\n` +
+      `_Tap each card to reveal the answer 🔄_`;
 
     // Send to each student (continue on individual failures)
     let sent = 0;
