@@ -553,12 +553,133 @@ app.get("/webhook/instagram", (req, res) => {
   if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
   return res.sendStatus(403);
 });
+// ── Instagram comment classifier + auto-reply ─────────────────────────────────
+async function handleInstagramComment(bizId, igUserId, igToken, commentId, mediaId, username, text) {
+  try {
+    // Skip if already replied
+    const { rows: existing } = await db.query(
+      `SELECT id FROM instagram_comment_replies WHERE comment_id=$1`, [commentId]
+    );
+    if (existing.length) return;
+
+    if (!GROQ_API_KEY) return;
+    const settings    = await getSettings(bizId);
+    const businessName = settings.business_name || "our business";
+    const locationUrl  = settings.location_url  || "";
+    const faqText      = settings.faq_text       || "";
+    const industry     = settings.industry       || "";
+
+    // Build context for Groq
+    const context = [
+      `Business: ${businessName} (${industry})`,
+      locationUrl ? `Location: ${locationUrl}` : "",
+      faqText     ? `FAQs: ${faqText.slice(0, 500)}` : "",
+    ].filter(Boolean).join("\n");
+
+    const prompt = `You are a social media manager for "${businessName}".
+Someone commented on an Instagram reel: "${text}"
+
+${context}
+
+Task: Write a SHORT, friendly reply (max 2 sentences) to this comment.
+- If asking location/address → include the location URL or say "DM us for address"
+- If asking price/fees → give info from FAQ or say "DM us for pricing"
+- If asking about enrollment/booking → guide them to DM
+- If compliment → thank them warmly
+- If general question → answer briefly using business context
+- Keep it professional, warm, use 1 emoji max
+- Reply in the SAME LANGUAGE as the comment (Hindi/English/Hinglish)
+- Do NOT add quotation marks around the reply
+Reply:`;
+
+    const gc   = new (require("groq-sdk"))({ apiKey: GROQ_API_KEY });
+    const resp = await gc.chat.completions.create({
+      model: "llama-3.1-8b-instant",
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 100, temperature: 0.4,
+    });
+    const replyText = resp.choices?.[0]?.message?.content?.trim();
+    if (!replyText) return;
+
+    // Post reply to Instagram comment
+    const replyRes = await fetch(
+      `https://graph.facebook.com/v21.0/${commentId}/replies`,
+      {
+        method : "POST",
+        headers: { "Content-Type": "application/json" },
+        body   : JSON.stringify({ message: replyText, access_token: igToken }),
+      }
+    );
+    const replyData = await replyRes.json();
+    if (replyData.error) {
+      console.warn("[IG Comment Reply] API error:", replyData.error.message);
+      return;
+    }
+
+    // Log the reply
+    await db.query(
+      `INSERT INTO instagram_comment_replies (business_id, media_id, comment_id, username, comment_text, reply_text)
+       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (comment_id) DO NOTHING`,
+      [bizId, mediaId, commentId, username || "", text, replyText]
+    );
+
+    // Notify owner on WhatsApp (fire and forget)
+    const numInfo = await waNumbers.getByBusinessId(bizId).catch(() => null);
+    if (numInfo?.phone_number_id && numInfo?.token) {
+      const ownerSettings = await getSettings(bizId);
+      if (ownerSettings.whatsapp_number) {
+        const notif = `📸 *Instagram Comment Auto-Reply*\n\n` +
+          `@${username} commented:\n"${text}"\n\n` +
+          `✅ Bot replied:\n"${replyText}"`;
+        wa.send(ownerSettings.whatsapp_number.replace(/\D/g, ""), notif,
+          numInfo.phone_number_id, numInfo.token).catch(() => {});
+      }
+    }
+
+    console.log(`[IG Comment] Replied to @${username}: "${replyText.slice(0,50)}"`);
+  } catch (e) {
+    console.error("[IG Comment Reply] Error:", e.message);
+  }
+}
+
 app.post("/webhook/instagram", async (req, res) => {
   res.sendStatus(200); // respond immediately so Meta doesn't retry
 
   try {
     const body = req.body;
-    if (body.object !== "instagram") return;
+    if (body.object !== "instagram" && body.object !== "page") return;
+
+    // ── Handle comment events ──────────────────────────────────────────────
+    for (const entry of (body.entry || [])) {
+      for (const change of (entry.changes || [])) {
+        if (change.field === "comments" && change.value) {
+          const v          = change.value;
+          const commentId  = v.id;
+          const mediaId    = v.media?.id || "";
+          const username   = v.from?.username || v.from?.name || "";
+          const commentText = v.text || "";
+          if (!commentId || !commentText.trim()) continue;
+
+          // Find which business this Instagram account belongs to
+          // Look up by instagram_account_id in business_settings
+          try {
+            const { rows: bizRows } = await db.query(
+              `SELECT business_id, instagram_access_token, instagram_account_id
+               FROM business_settings
+               WHERE instagram_account_id IS NOT NULL AND instagram_account_id != ''
+               LIMIT 20`
+            );
+            for (const biz of bizRows) {
+              // Check if this media belongs to this business (by querying media owner)
+              await handleInstagramComment(
+                biz.business_id, biz.instagram_account_id,
+                biz.instagram_access_token, commentId, mediaId, username, commentText
+              );
+            }
+          } catch (e) { console.warn("[IG Comment webhook]", e.message); }
+        }
+      }
+    }
 
     for (const entry of (body.entry || [])) {
       for (const event of (entry.messaging || [])) {
@@ -658,9 +779,43 @@ app.post("/webhook/payment", async (req, res) => {
 // MESSAGE ROUTER
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Track broadcast engagement when student sends any message ────────────────
+async function trackBroadcastEngagement(bizId) {
+  try {
+    const now  = Date.now();
+    const h1   = now - 3600000;         // 1 hour ago
+    const h24  = now - 86400000;        // 24 hours ago
+    const d7   = now - 604800000;       // 7 days ago
+
+    // Get most recent broadcast for this business (within last 7 days)
+    const { rows } = await db.query(
+      `SELECT id, sent_at FROM broadcast_logs
+       WHERE business_id=$1 AND sent_at > NOW() - INTERVAL '7 days'
+       ORDER BY sent_at DESC LIMIT 1`,
+      [bizId]
+    );
+    if (!rows.length) return;
+
+    const broadcast = rows[0];
+    const sentMs    = new Date(broadcast.sent_at).getTime();
+    const elapsed   = now - sentMs;
+
+    // Increment the right engagement window(s)
+    let setClause = "replies_7d = replies_7d + 1, last_reply_at = NOW()";
+    if (elapsed <= 3600000)  setClause = "replies_1h = replies_1h + 1, replies_24h = replies_24h + 1, replies_7d = replies_7d + 1, last_reply_at = NOW()";
+    else if (elapsed <= 86400000) setClause = "replies_24h = replies_24h + 1, replies_7d = replies_7d + 1, last_reply_at = NOW()";
+
+    await db.query(`UPDATE broadcast_logs SET ${setClause} WHERE id=$1`, [broadcast.id]);
+  } catch (e) { console.warn("[broadcast engagement]", e.message); }
+}
+
 async function routeMessage(customerId, sess, message, name) {
   const state = sess.state;
   const lang  = sess.lang || "english";
+  const bizId = sess.businessId || DEFAULT_BUSINESS_ID;
+
+  // ── Track broadcast engagement (fire-and-forget) ──────────────────────────
+  trackBroadcastEngagement(bizId).catch(() => {});
 
   // ── Shop page cart: customer sent SELLY_CART: from the shop link ──────────
   if (message.includes("SELLY_CART:")) return handleSellyCart(customerId, sess, message, name);
@@ -4712,12 +4867,20 @@ app.get("/api/ai/engagement", async (req, res) => {
       }
     }
 
+    // Enrich broadcasts with engagement rate + label
+    const broadcasts = broadcastR.rows.map(b => {
+      const engRate = b.recipient_count > 0
+        ? Math.round((b.replies_24h / b.recipient_count) * 100) : 0;
+      const label = engRate >= 30 ? "🔥 High" : engRate >= 10 ? "✅ Good" : "⚠️ Low";
+      return { ...b, engRate, engLabel: label };
+    });
+
     res.json({
       students: { total, active7, active30, inactive,
-        rate7: total > 0 ? Math.round((active7 / total) * 100) : 0,
+        rate7 : total > 0 ? Math.round((active7  / total) * 100) : 0,
         rate30: total > 0 ? Math.round((active30 / total) * 100) : 0,
       },
-      broadcasts: broadcastR.rows,
+      broadcasts,
       reengageTip: tip,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4788,7 +4951,43 @@ app.get("/api/ai/instagram-insights", async (req, res) => {
       } catch {}
     }
 
-    res.json({ connected: true, posts, suggestions });
+    // Also fetch stored DB metrics (updated by cron) for trend analysis
+    const { rows: storedPosts } = await db.query(
+      `SELECT media_id, media_type, reach, impressions, likes, comments_count, saves, posted_at
+       FROM instagram_posts WHERE business_id=$1
+       ORDER BY posted_at DESC LIMIT 20`,
+      [bid]
+    );
+
+    // AI content suggestions based on patterns
+    let contentSuggestions = "";
+    if (GROQ_API_KEY && storedPosts.length >= 3) {
+      const topPost = [...storedPosts].sort((a,b) => (b.reach||0) - (a.reach||0))[0];
+      const avgReach = Math.round(storedPosts.reduce((s,p) => s + (p.reach||0), 0) / storedPosts.length);
+      const videoCount = storedPosts.filter(p => p.media_type === "VIDEO").length;
+      const imageCount = storedPosts.filter(p => p.media_type !== "VIDEO").length;
+
+      const patternSummary = `Total posts analyzed: ${storedPosts.length}\n` +
+        `Videos: ${videoCount}, Images: ${imageCount}\n` +
+        `Average reach: ${avgReach}\n` +
+        `Top post reach: ${topPost?.reach || 0} (${topPost?.media_type})\n` +
+        `Recent posts: ${storedPosts.slice(0,5).map(p => `${p.media_type} reach=${p.reach} likes=${p.likes} saves=${p.saves}`).join(", ")}`;
+
+      try {
+        const gc   = new (require("groq-sdk"))({ apiKey: GROQ_API_KEY });
+        const resp = await gc.chat.completions.create({
+          model: "llama-3.1-8b-instant",
+          messages: [{ role: "user", content:
+            `You are an Instagram content strategist for a small business. Based on these metrics:\n\n${patternSummary}\n\n` +
+            `Give:\n1. What content type is performing best and why\n2. Best posting strategy (what to post more of)\n3. One specific video prompt idea that would likely perform well\n\nBe specific and actionable. Under 150 words.`
+          }],
+          max_tokens: 250, temperature: 0.5,
+        });
+        contentSuggestions = resp.choices?.[0]?.message?.content?.trim() || "";
+      } catch {}
+    }
+
+    res.json({ connected: true, posts, suggestions, contentSuggestions, storedPosts });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -5319,6 +5518,73 @@ async function checkClassReminders() {
   }
 }
 setInterval(() => checkClassReminders(), 5 * 60 * 1000); // every 5 min
+
+// ── Per-reel metrics auto-fetch (every 24 hours) ──────────────────────────────
+async function fetchAllReelMetrics() {
+  console.log("[Reel Metrics] Starting daily fetch...");
+  try {
+    // Get all businesses with Instagram connected
+    const { rows: bizRows } = await db.query(
+      `SELECT business_id, instagram_account_id, instagram_access_token
+       FROM business_settings
+       WHERE instagram_account_id IS NOT NULL AND instagram_account_id != ''
+       AND instagram_access_token IS NOT NULL AND instagram_access_token != ''`
+    );
+
+    for (const biz of bizRows) {
+      try {
+        const igToken  = biz.instagram_access_token;
+        const igUserId = biz.instagram_account_id;
+        const ver      = "v21.0";
+
+        // Get recent posts that haven't been fetched today
+        const { rows: posts } = await db.query(
+          `SELECT id, media_id FROM instagram_posts
+           WHERE business_id=$1
+           AND (last_fetched_at IS NULL OR last_fetched_at < NOW() - INTERVAL '23 hours')
+           ORDER BY posted_at DESC LIMIT 20`,
+          [biz.business_id]
+        );
+
+        for (const post of posts) {
+          try {
+            // Fetch insights
+            const insRes = await fetch(
+              `https://graph.facebook.com/${ver}/${post.media_id}/insights?metric=impressions,reach,saved&access_token=${igToken}`
+            );
+            const insData = await insRes.json();
+            if (insData.error) continue;
+
+            const m = {};
+            for (const item of (insData.data || [])) m[item.name] = item.values?.[0]?.value || 0;
+
+            // Fetch basic media info (likes, comments)
+            const mediaRes = await fetch(
+              `https://graph.facebook.com/${ver}/${post.media_id}?fields=like_count,comments_count&access_token=${igToken}`
+            );
+            const mediaData = await mediaRes.json();
+
+            await db.query(
+              `UPDATE instagram_posts SET
+               reach=$1, impressions=$2, saves=$3,
+               likes=$4, comments_count=$5, last_fetched_at=NOW()
+               WHERE id=$6`,
+              [
+                m.reach || 0, m.impressions || 0, m.saved || 0,
+                mediaData.like_count || 0, mediaData.comments_count || 0,
+                post.id,
+              ]
+            );
+          } catch (e) { console.warn(`[Reel Metrics] Post ${post.media_id}:`, e.message); }
+        }
+        console.log(`[Reel Metrics] Updated ${posts.length} posts for ${biz.business_id}`);
+      } catch (e) { console.warn(`[Reel Metrics] Biz ${biz.business_id}:`, e.message); }
+    }
+  } catch (e) { console.error("[Reel Metrics] Fatal:", e.message); }
+}
+
+fetchAllReelMetrics().catch(() => {}); // run once on startup
+setInterval(() => fetchAllReelMetrics().catch(() => {}), 24 * 60 * 60 * 1000); // then every 24h
 
 // Review request (24h after delivery)
 function scheduleReviewRequest(customerId, orderId, customerName) {
