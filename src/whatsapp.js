@@ -64,17 +64,8 @@ async function markReadAndType(to, messageId, phoneId = PHONE_ID, token = WA_TOK
     message_id       : messageId,
   }), token).catch(() => {});
 
-  // Show typing dots
-  await apiPost(`/${phoneId}/messages`, JSON.stringify({
-    messaging_product: "whatsapp",
-    recipient_type   : "individual",
-    to,
-    type             : "text",
-    "typing"         : { status: "on" },
-  }), token).catch(() => {});
-
-  // Hold typing for 1.5 seconds
-  await new Promise(r => setTimeout(r, 1500));
+  // Hold briefly before sending response (simulates natural delay)
+  await new Promise(r => setTimeout(r, 800));
 }
 
 // ── Internal API call ─────────────────────────────────────────────────────────

@@ -1283,6 +1283,24 @@ async function handleSearch(customerId, sess, message, name) {
     }
   }
 
+  // ── Groq FAQ/doubt check — runs BEFORE intent extraction ─────────────────────
+  // Catches: academic doubts, FAQ questions, policy/delivery/timing queries etc.
+  const qSettings0 = await getSettings(bizId);
+  const qIndustry0 = (qSettings0.industry || "").toLowerCase();
+  const qFaq0      = (qSettings0.faq_text  || "").trim();
+
+  const isDoubtMsg =
+    // Question words at start
+    /^(explain|what|how|why|when|where|who|which|define|solve|calculate|describe|tell me|difference between|meaning of|full form|formula|example of|give me|can you|help me|is there|are there|do you|does|did|will you|would|should|could|shall)/i.test(message.trim())
+    // Hindi/Hinglish question starters
+    || /^(kya|kab|kaise|kahan|kaun|kyun|bata|samjha|matlab|iska|aap|kya aap|kya hai|kya hoga|kya milega|kya hota)/i.test(message.trim())
+    // Business FAQ keywords — delivery, timing, payment, return, policy etc.
+    || /\b(deliver|delivery|shipping|ship|return|refund|cancel|policy|timing|timings|time|hours|open|close|payment|pay|emi|installment|accept|available|charge|fee|fees|discount|offer|warranty|guarantee|replace|exchange|cod|cash on delivery|online payment|upi|card|wallet)\b/i.test(message)
+    // Any message with a question mark
+    || /\?/.test(message);
+
+  const isEducation = qIndustry0.includes("education");
+
   // ── Demo video request (education only) ──────────────────────────────────────
   const isDemoRequest = isEducation &&
     /\b(demo|demo class|demo video|free class|trial class|sample class|demo lecture|demo session|preview|free lecture|dekh|dekhna|sample video)\b/i.test(message);
@@ -1316,24 +1334,6 @@ async function handleSearch(customerId, sess, message, name) {
       console.warn("[Demo] Error fetching videos:", e.message);
     }
   }
-
-  // ── Groq FAQ/doubt check — runs BEFORE intent extraction ─────────────────────
-  // Catches: academic doubts, FAQ questions, policy/delivery/timing queries etc.
-  const qSettings0 = await getSettings(bizId);
-  const qIndustry0 = (qSettings0.industry || "").toLowerCase();
-  const qFaq0      = (qSettings0.faq_text  || "").trim();
-
-  const isDoubtMsg =
-    // Question words at start
-    /^(explain|what|how|why|when|where|who|which|define|solve|calculate|describe|tell me|difference between|meaning of|full form|formula|example of|give me|can you|help me|is there|are there|do you|does|did|will you|would|should|could|shall)/i.test(message.trim())
-    // Hindi/Hinglish question starters
-    || /^(kya|kab|kaise|kahan|kaun|kyun|bata|samjha|matlab|iska|aap|kya aap|kya hai|kya hoga|kya milega|kya hota)/i.test(message.trim())
-    // Business FAQ keywords — delivery, timing, payment, return, policy etc.
-    || /\b(deliver|delivery|shipping|ship|return|refund|cancel|policy|timing|timings|time|hours|open|close|payment|pay|emi|installment|accept|available|charge|fee|fees|discount|offer|warranty|guarantee|replace|exchange|cod|cash on delivery|online payment|upi|card|wallet)\b/i.test(message)
-    // Any message with a question mark
-    || /\?/.test(message);
-
-  const isEducation = qIndustry0.includes("education");
 
   // ── Education: only serve AI to active students ────────────────────────────
   // Check if this student is in the client's student list with an active status.
