@@ -933,15 +933,16 @@ async function routeMessage(customerId, sess, message, name) {
     return handlePaymentChoice(customerId, sess, message);
   }
 
-  // ── Global doubt interceptor for education (mid-flow) ────────────────────
-  // If student is in any enrollment state and asks an academic doubt,
-  // answer it via Groq without resetting their session state.
-  if (state && state !== "idle" && state !== "searching") {
+  // ── Global doubt interceptor for education (all states) ────────────────────
+  // If student asks an academic doubt (regardless of state), answer via Groq
+  // without changing their session state. This works for: browsing, enrolling,
+  // paying, OR during checkout - any time they have a question.
+  {  // Runs in ALL states (no condition)
     const bizId3   = sess.businessId || DEFAULT_BUSINESS_ID;
     const s3       = await getSettings(bizId3);
     const isEdu3   = (s3.industry || "").toLowerCase().includes("education");
-    const isDoubt3 = /^(explain|what|how|why|when|where|who|which|define|solve|calculate|describe|tell me|difference|meaning|formula|example)/i.test(message.trim())
-      || /^(kya|kab|kaise|kahan|kaun|kyun|bata|samjha|matlab)/i.test(message.trim())
+    const isDoubt3 = /^(explain|what|how|why|when|where|who|which|define|solve|calculate|describe|tell me|difference|meaning|formula|example)\b/i.test(message.trim())
+      || /\b(kya|kab|kaise|kahan|kaun|kyun|bata|samjha|matlab)\b/i.test(message.trim())
       || (/\?/.test(message) && !/^[12]/.test(message.trim())); // exclude "1?" or "2?"
 
     if (isEdu3 && isDoubt3 && GROQ_API_KEY) {
@@ -958,10 +959,13 @@ async function routeMessage(customerId, sess, message, name) {
             selecting           : "_To continue, reply with a number from the options above_",
           }[state] || "";
 
+          console.log(`[Doubt Answered] For ${customerId} in state=${state}. Sending AI answer and stopping.`);
           await send(customerId, `🤖 *AI Assistant:*\n\n${aiAnswer}${stateReminder ? `\n\n${stateReminder}` : ""}`);
-          return; // session state fully preserved
+          return; // ← CRITICAL: STOP HERE. Do NOT continue to state machine
         }
-      } catch (_) {}
+      } catch (e) {
+        console.error(`[Doubt Interceptor Error]`, e.message);
+      }
     }
   }
 
@@ -1376,6 +1380,7 @@ async function handleSearch(customerId, sess, message, name) {
     /\b(demo|demo class|demo video|free class|trial class|sample class|demo lecture|demo session|preview|free lecture|dekh|dekhna|sample video)\b/i.test(message);
 
   if (isDemoRequest) {
+
     try {
       const { rows: demoRows } = await db.query(
         `SELECT title, description, url, subject FROM demo_videos
