@@ -346,6 +346,22 @@ async function sendReplies(to, text, replies) {
 
 const DEFAULT_BUSINESS_ID = process.env.BUSINESS_ID || "default";
 
+// ── WhatsApp message deduplication ────────────────────────────────────────────
+// Meta retries webhooks and sometimes delivers the same message ID twice.
+// We cache processed message IDs for 10 minutes to silently drop duplicates.
+const processedMsgIds = new Map(); // msgId → timestamp
+const MSG_DEDUP_TTL   = 10 * 60 * 1000; // 10 minutes
+function isDuplicate(msgId) {
+  const now = Date.now();
+  // Purge expired entries every time we check (keeps memory lean)
+  for (const [id, ts] of processedMsgIds) {
+    if (now - ts > MSG_DEDUP_TTL) processedMsgIds.delete(id);
+  }
+  if (processedMsgIds.has(msgId)) return true;
+  processedMsgIds.set(msgId, now);
+  return false;
+}
+
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
@@ -432,6 +448,12 @@ app.post("/webhook/whatsapp", async (req, res) => {
         for (const msg of messages) {
           const senderId = msg.from;
           if (!senderId) continue;
+
+          // ── Deduplication: skip if we already processed this message ID ──
+          if (msg.id && isDuplicate(msg.id)) {
+            console.log(`[Webhook] Duplicate message ignored: ${msg.id}`);
+            continue;
+          }
 
           const name       = value.contacts?.[0]?.profile?.name || "Customer";
           const first_name = name.split(" ")[0];
