@@ -1175,8 +1175,10 @@ async function notifyOwner(bizId, customerId, customerName, message, type = "que
     const custNum  = customerId.replace(/[^0-9]/g, "");
     const replyUrl = `https://wa.me/${custNum}`;
 
-    const emoji = type === "product_request" ? "📦" : "💬";
-    const label = type === "product_request" ? "Product Request (not in catalog)" : "Customer Query";
+    const emoji = type === "product_request" ? "📦" : type === "student_query" ? "🎓" : "💬";
+    const label = type === "product_request" ? "Product Request (not in catalog)"
+                : type === "student_query"   ? "Student Special Request"
+                : "Customer Query";
 
     const text =
       `🔔 *New ${label}*\n\n` +
@@ -1300,6 +1302,23 @@ async function handleSearch(customerId, sess, message, name) {
     || /\?/.test(message);
 
   const isEducation = qIndustry0.includes("education");
+
+  // ── Education: smart query detection — forward unusual requests to owner ─────
+  // Catches requests the bot can't resolve: discounts, scholarships, complaints etc.
+  if (isEducation) {
+    const isSpecialQuery = /\b(discount|scholarship|concession|fee\s*waiver|installment|emi|part\s*payment|free\s*admission|free\s*course|complaint|refund|certificate|result|marksheet|progress\s*report|attendance|hostel|transport|uniform|books|study\s*material|notes|assignment|homework|doubt|doubt\s*class|extra\s*class|batch\s*change|transfer|withdrawal|leave|holiday|exam\s*date|exam\s*schedule|hall\s*ticket|admit\s*card|syllabus|timetable|time\s*table)\b/i.test(message);
+
+    if (isSpecialQuery) {
+      const queryMsg = {
+        hindi   : `📝 आपकी request हमारी team को भेज दी गई है!\n\n*"${message}"*\n\nहम जल्द ही आपसे संपर्क करेंगे। 😊`,
+        hinglish: `📝 Aapki request team ko forward ho gayi hai!\n\n*"${message}"*\n\nHum jald se jald reply karenge. 😊`,
+        english : `📝 Your request has been forwarded to our team!\n\n*"${message}"*\n\nWe'll get back to you shortly. 😊`,
+      };
+      await send(customerId, queryMsg[lang] || queryMsg.english);
+      await notifyOwner(bizId, customerId, name, message, "student_query");
+      return;
+    }
+  }
 
   // ── Demo video request (education only) ──────────────────────────────────────
   const isDemoRequest = isEducation &&
