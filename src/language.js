@@ -58,8 +58,21 @@ function detectLanguage(text) {
     "dekhao", "batao", "milega", "doge", "loge", "zyada", "thoda", "sasta",
     "mehnga", "accha", "bilkul", "zaroor", "abhi", "baad",
   ];
+
+  // Marathi transliteration — Marathi words written in Latin script
+  const marathiKeywords = [
+    "ahe", "aahe", "mala", "nahi", "kase", "kay", "mee", "mein", "tumhala",
+    "amhi", "he", "te", "kara", "sanga", "aani", "kimva", "tar", "pan",
+    "mag", "kadhee", "kothe", "kadhale", "naahi", "karnar", "nuste", "la",
+  ];
+
   const lower         = text.toLowerCase();
-  const hinglishCount = hinglishKeywords.filter(w => lower.split(/\W+/).includes(w)).length;
+  const words         = lower.split(/\W+/);
+  const hinglishCount = hinglishKeywords.filter(w => words.includes(w)).length;
+  const marathiCount  = marathiKeywords.filter(w => words.includes(w)).length;
+
+  // Marathi transliteration takes precedence if both match
+  if (marathiCount >= 2) return "marathi";
   if (hinglishCount >= 2) return "hinglish";
 
   return "english";
@@ -80,9 +93,9 @@ function getLanguageInstruction(lang) {
       "Keep it conversational. Do NOT switch to formal English.",
 
     marathi:
-      "IMPORTANT: The customer is writing in Marathi. " +
-      "You MUST reply in Marathi using Devanagari script. " +
-      "Casual, friendly Marathi tone.",
+      "IMPORTANT: The customer is writing in Marathi (either native Devanagari script or transliterated in Latin letters). " +
+      "You MUST reply in Marathi using proper Devanagari script. " +
+      "Be casual, friendly, and warm. Keep sentences short and clear. Emojis welcome.",
 
     gujarati:
       "IMPORTANT: The customer is writing in Gujarati. " +
