@@ -912,7 +912,58 @@ async function routeMessage(customerId, sess, message, name) {
   }
 
   // ── COD confirmation ──────────────────────────────────────────────────────
-  if (state === "choosing_payment") return handlePaymentChoice(customerId, sess, message);
+  // But first: if student asks an academic doubt while in payment flow, answer it
+  // without breaking their session state so they can still complete enrollment.
+  if (state === "choosing_payment") {
+    const isDoubt = /^(explain|what|how|why|when|where|who|which|define|solve|calculate|describe|tell me|difference|meaning|formula|example)/i.test(message.trim())
+      || /^(kya|kab|kaise|kahan|kaun|kyun|bata|samjha|matlab)/i.test(message.trim())
+      || /\?/.test(message);
+    if (isDoubt && GROQ_API_KEY) {
+      try {
+        const bizId2    = sess.businessId || DEFAULT_BUSINESS_ID;
+        const s2        = await getSettings(bizId2);
+        const nbCtx2    = await getNotebookContext(bizId2).catch(() => "");
+        const aiAnswer  = await groqAnswer(message, s2.industry || "education", s2.business_name || "", s2.faq_text || "", lang, false, nbCtx2);
+        if (aiAnswer) {
+          await send(customerId, `🤖 *AI Assistant:*\n\n${aiAnswer}\n\n_💳 To continue your enrollment, please choose payment: reply *1* for Online or *2* for COD_`);
+          return; // session state preserved — student can still pay
+        }
+      } catch (_) {}
+    }
+    return handlePaymentChoice(customerId, sess, message);
+  }
+
+  // ── Global doubt interceptor for education (mid-flow) ────────────────────
+  // If student is in any enrollment state and asks an academic doubt,
+  // answer it via Groq without resetting their session state.
+  if (state && state !== "idle" && state !== "searching") {
+    const bizId3   = sess.businessId || DEFAULT_BUSINESS_ID;
+    const s3       = await getSettings(bizId3);
+    const isEdu3   = (s3.industry || "").toLowerCase().includes("education");
+    const isDoubt3 = /^(explain|what|how|why|when|where|who|which|define|solve|calculate|describe|tell me|difference|meaning|formula|example)/i.test(message.trim())
+      || /^(kya|kab|kaise|kahan|kaun|kyun|bata|samjha|matlab)/i.test(message.trim())
+      || (/\?/.test(message) && !/^[12]/.test(message.trim())); // exclude "1?" or "2?"
+
+    if (isEdu3 && isDoubt3 && GROQ_API_KEY) {
+      try {
+        const nbCtx3   = await getNotebookContext(bizId3).catch(() => "");
+        const aiAnswer = await groqAnswer(message, s3.industry || "education", s3.business_name || "", s3.faq_text || "", lang, false, nbCtx3);
+        if (aiAnswer) {
+          // Build a context-aware reminder based on current state
+          const stateReminder = {
+            choosing_payment    : "_💳 To continue, reply *1* for Online or *2* for COD_",
+            collecting_mobile   : "_📱 To continue, please send your 10-digit mobile number_",
+            verifying_mobile_otp: "_🔐 To continue, please enter the OTP sent to your number_",
+            collecting_address  : "_📍 To continue, please send your delivery address_",
+            selecting           : "_To continue, reply with a number from the options above_",
+          }[state] || "";
+
+          await send(customerId, `🤖 *AI Assistant:*\n\n${aiAnswer}${stateReminder ? `\n\n${stateReminder}` : ""}`);
+          return; // session state fully preserved
+        }
+      } catch (_) {}
+    }
+  }
 
   // ── Kirana industry — route all messages to kirana flow ───────────────────
   if (!state || state === "idle" || state === "searching" || state?.startsWith("kirana_")) {
