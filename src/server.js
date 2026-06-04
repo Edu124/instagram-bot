@@ -432,6 +432,11 @@ app.post("/webhook/whatsapp", async (req, res) => {
         const value    = change.value;
         const messages = value?.messages || [];
 
+        // ── Skip status-only payloads (sent/delivered/read receipts) ─────
+        // Meta sends statuses in the same webhook. If there are no messages
+        // but there are statuses, this is a delivery receipt — ignore it.
+        if (!messages.length) continue;
+
         // ── Resolve which client (business) owns this phone number ────────
         const incomingPhoneId = value.metadata?.phone_number_id || "";
         let   routedBusinessId = DEFAULT_BUSINESS_ID;
@@ -448,6 +453,15 @@ app.post("/webhook/whatsapp", async (req, res) => {
         for (const msg of messages) {
           const senderId = msg.from;
           if (!senderId) continue;
+
+          // ── Only process inbound customer messages ────────────────────
+          // Skip status echoes, reactions, stickers, and unsupported types
+          // that sometimes appear in the messages array.
+          const HANDLED_TYPES = ["text", "image", "audio", "video", "document", "location", "button", "interactive"];
+          if (!HANDLED_TYPES.includes(msg.type)) {
+            console.log(`[Webhook] Skipping msg type="${msg.type}" from ${senderId}`);
+            continue;
+          }
 
           // ── Deduplication: skip if we already processed this message ID ──
           if (msg.id && isDuplicate(msg.id)) {
