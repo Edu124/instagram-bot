@@ -106,18 +106,40 @@ function apiPost(path, bodyStr, token = WA_TOKEN) {
 }
 
 // ── Send a video message ──────────────────────────────────────────────────────
+// WhatsApp video type only works with direct downloadable MP4/video files.
+// YouTube, Instagram, Drive, and other link URLs must be sent as text messages
+// so students can tap and open them — Meta will reject them as video type.
 async function sendVideo(to, videoUrl, caption = "", phoneId = PHONE_ID, token = WA_TOKEN) {
   if (!token || !phoneId) {
     console.log(`[WhatsApp MOCK] → ${to}: [VIDEO] ${videoUrl} — "${caption.slice(0, 60)}"`);
     return;
   }
-  const body = JSON.stringify({
-    messaging_product: "whatsapp",
-    to,
-    type: "video",
-    video: { link: videoUrl, caption: sanitize(caption) },
-  });
-  return apiPost(`/${phoneId}/messages`, body, token);
+
+  // Check if this is a direct video file or a link (YouTube, Instagram, etc.)
+  const isDirectVideo = /\.(mp4|mov|avi|webm|mkv|3gp)(\?.*)?$/i.test(videoUrl);
+
+  if (isDirectVideo) {
+    // Send as WhatsApp video (plays inline)
+    const body = JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type : "video",
+      video: { link: videoUrl, caption: sanitize(caption) },
+    });
+    return apiPost(`/${phoneId}/messages`, body, token);
+  } else {
+    // Send as text with the link — works for YouTube, Drive, Instagram, etc.
+    const text = caption
+      ? `${sanitize(caption)}\n\n${videoUrl}`
+      : videoUrl;
+    const body = JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: { body: text.slice(0, 4096), preview_url: true },
+    });
+    return apiPost(`/${phoneId}/messages`, body, token);
+  }
 }
 
 // ── Send an image message ─────────────────────────────────────────────────────
