@@ -2859,14 +2859,16 @@ app.get ("/api/customers/:id",   async (req, res) => {
 app.get("/api/batches", async (req, res) => {
   const bid = getBid(req);
   try {
-    // Match exact business_id OR 'default' fallback (handles legacy rows)
-    const { rows } = await db.query(
-      `SELECT DISTINCT batch FROM bot_customers
-       WHERE (business_id=$1 OR business_id='default') AND batch IS NOT NULL AND batch != ''
-       ORDER BY batch ASC`,
-      [bid]
-    );
-    res.json({ batches: rows.map(r => r.batch) });
+    // bot_customers lives in Supabase — must use supabaseAdmin, not db (Railway Postgres)
+    const { data, error } = await supabaseAdmin
+      .from("bot_customers")
+      .select("batch")
+      .or(`business_id.eq.${bid},business_id.eq.default`)
+      .not("batch", "is", null)
+      .neq("batch", "");
+    if (error) throw new Error(error.message);
+    const batches = [...new Set((data || []).map(r => r.batch).filter(Boolean))].sort();
+    res.json({ batches });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -5561,38 +5563,55 @@ async function checkClassReminders() {
       const token     = sched.token           || DEFAULT_WA_TOKEN;
 
       // Get students to notify — filtered by notify_mode
+      // bot_customers lives in Supabase — use supabaseAdmin, not db (Railway Postgres)
       let customers;
-      if (sched.notify_mode === "course" && sched.course_id) {
-        // Only students who ordered this specific course (cart contains product with matching id)
-        const { rows } = await db.query(
-          `SELECT id, name FROM bot_customers
-           WHERE id IN (
-             SELECT DISTINCT customer_id FROM orders
-             WHERE business_id=$1 AND status IN ('confirmed','delivered')
-               AND cart @> $2::jsonb
-           ) LIMIT 500`,
+      if (sched.notify_mode === "batch" && sched.batch_name) {
+        // Only students assigned to this batch/class
+        const { data } = await supabaseAdmin
+          .from("bot_customers")
+          .select("id, name")
+          .eq("business_id", sched.business_id)
+          .eq("batch", sched.batch_name)
+          .limit(500);
+        customers = data || [];
+      } else if (sched.notify_mode === "course" && sched.course_id) {
+        // Only students who ordered this specific course
+        // orders lives in Railway Postgres — fetch customer_ids from there, then look up in Supabase
+        const { rows: orderRows } = await db.query(
+          `SELECT DISTINCT customer_id FROM orders
+           WHERE business_id=$1 AND status IN ('confirmed','delivered','active')
+             AND cart @> $2::jsonb LIMIT 500`,
           [sched.business_id, JSON.stringify([{ id: sched.course_id }])]
         );
-        customers = rows;
-      } else if (sched.notify_mode === "batch" && sched.batch_name) {
-        // Only students assigned to this batch/class
-        const { rows } = await db.query(
-          `SELECT id, name FROM bot_customers
-           WHERE business_id=$1 AND batch=$2 LIMIT 500`,
-          [sched.business_id, sched.batch_name]
-        );
-        customers = rows;
+        const ids = orderRows.map(r => r.customer_id).filter(Boolean);
+        if (ids.length) {
+          const { data } = await supabaseAdmin
+            .from("bot_customers")
+            .select("id, name")
+            .in("id", ids)
+            .limit(500);
+          customers = data || [];
+        } else {
+          customers = [];
+        }
       } else {
-        // All enrolled students (confirmed or delivered orders)
-        const { rows } = await db.query(
-          `SELECT id, name FROM bot_customers
-           WHERE id IN (
-             SELECT DISTINCT customer_id FROM orders
-             WHERE business_id=$1 AND status IN ('confirmed','delivered')
-           ) LIMIT 500`,
+        // All enrolled students (confirmed/active orders)
+        const { rows: orderRows } = await db.query(
+          `SELECT DISTINCT customer_id FROM orders
+           WHERE business_id=$1 AND status IN ('confirmed','delivered','active') LIMIT 500`,
           [sched.business_id]
         );
-        customers = rows;
+        const ids = orderRows.map(r => r.customer_id).filter(Boolean);
+        if (ids.length) {
+          const { data } = await supabaseAdmin
+            .from("bot_customers")
+            .select("id, name")
+            .in("id", ids)
+            .limit(500);
+          customers = data || [];
+        } else {
+          customers = [];
+        }
       }
 
       // 60-min reminder
