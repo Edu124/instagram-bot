@@ -1397,7 +1397,9 @@ async function handleSearch(customerId, sess, message, name) {
   // ── Education: smart query detection — forward unusual requests to owner ─────
   // Catches requests the bot can't resolve: discounts, scholarships, complaints etc.
   if (isEducation) {
-    const isSpecialQuery = /\b(discount|scholarship|concession|fee\s*waiver|installment|emi|part\s*payment|free\s*admission|free\s*course|complaint|refund|certificate|result|marksheet|progress\s*report|attendance|hostel|transport|uniform|books|study\s*material|notes|assignment|homework|doubt|doubt\s*class|extra\s*class|batch\s*change|transfer|withdrawal|leave|holiday|exam\s*date|exam\s*schedule|hall\s*ticket|admit\s*card|syllabus|timetable|time\s*table)\b/i.test(message);
+    // NOTE: 'doubt', 'notes', 'assignment', 'homework' are intentionally EXCLUDED —
+    // those are academic questions that should go to Groq + notebook context, not owner.
+    const isSpecialQuery = /\b(discount|scholarship|concession|fee\s*waiver|installment|emi|part\s*payment|free\s*admission|free\s*course|complaint|refund|certificate|result|marksheet|progress\s*report|attendance|hostel|transport|uniform|books|study\s*material|batch\s*change|transfer|withdrawal|leave|holiday|exam\s*date|exam\s*schedule|hall\s*ticket|admit\s*card|timetable|time\s*table)\b/i.test(message);
 
     if (isSpecialQuery) {
       const queryMsg = {
@@ -1461,15 +1463,16 @@ async function handleSearch(customerId, sess, message, name) {
         [customerId, bizId]
       );
       // Also check if manually added to bot_customers (offline admission)
+      // bot_customers lives in Supabase — must use supabaseAdmin here
       if (studentRows.length === 0) {
-        const { rows: custRows } = await db.query(
-          `SELECT id FROM bot_customers
-           WHERE id=$1 AND (business_id=$2 OR business_id='default')
-           LIMIT 1`,
-          [customerId, bizId]
-        );
+        const { data: custRows } = await supabaseAdmin
+          .from("bot_customers")
+          .select("id")
+          .eq("id", customerId)
+          .or(`business_id.eq.${bizId},business_id.eq.default`)
+          .limit(1);
         // If in customers list (manually added), treat as active
-        isActiveStudent = custRows.length > 0;
+        isActiveStudent = (custRows || []).length > 0;
       } else {
         isActiveStudent = true;
       }
