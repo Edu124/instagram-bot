@@ -4937,24 +4937,24 @@ app.get("/api/ai/engagement", async (req, res) => {
   try {
     const nowMs  = Date.now();
     const week7  = nowMs - 7  * 24 * 60 * 60 * 1000;
-    const week4  = nowMs - 30 * 24 * 60 * 60 * 1000;
-    const [totalR, active7R, active30R, broadcastR] = await Promise.all([
-      db.query(`SELECT COUNT(*) as cnt FROM bot_customers
-                WHERE (business_id=$1 OR business_id='default')`, [bid]),
-      db.query(`SELECT COUNT(*) as cnt FROM bot_customers
-                WHERE (business_id=$1 OR business_id='default')
-                AND last_active_at > $2`, [bid, week7]),
-      db.query(`SELECT COUNT(*) as cnt FROM bot_customers
-                WHERE (business_id=$1 OR business_id='default')
-                AND last_active_at > $2`, [bid, week4]),
-      db.query(`SELECT id, type, message_preview, recipient_count, reply_count, sent_at
+    const week30 = nowMs - 30 * 24 * 60 * 60 * 1000;
+
+    // bot_customers lives in Supabase (not Railway Postgres) — use supabaseAdmin.
+    // last_active_at is stored as a JS millisecond timestamp (bigint/numeric).
+    const { supabaseAdmin: supa } = require("./supabase");
+    const [allRows, broadcastR] = await Promise.all([
+      supa.from("bot_customers")
+        .select("last_active_at", { count: "exact" })
+        .or(`business_id.eq.${bid},business_id.eq.default`),
+      db.query(`SELECT id, type, message_preview, recipient_count, replies_1h, replies_24h, replies_7d, reply_count, sent_at
                 FROM broadcast_logs WHERE business_id=$1
                 ORDER BY sent_at DESC LIMIT 10`, [bid]),
     ]);
 
-    const total    = parseInt(totalR.rows[0]?.cnt  || 0);
-    const active7  = parseInt(active7R.rows[0]?.cnt || 0);
-    const active30 = parseInt(active30R.rows[0]?.cnt || 0);
+    const rows    = allRows.data || [];
+    const total   = rows.length;
+    const active7  = rows.filter(r => Number(r.last_active_at) > week7).length;
+    const active30 = rows.filter(r => Number(r.last_active_at) > week30).length;
     const inactive = Math.max(0, total - active30);
 
     // AI tip for inactive students
@@ -4980,10 +4980,11 @@ app.get("/api/ai/engagement", async (req, res) => {
 
     // Enrich broadcasts with engagement rate + label
     const broadcasts = broadcastR.rows.map(b => {
-      const engRate = b.recipient_count > 0
-        ? Math.round((b.replies_24h / b.recipient_count) * 100) : 0;
+      const replies24h = b.replies_24h || b.reply_count || 0;
+      const engRate    = b.recipient_count > 0
+        ? Math.round((replies24h / b.recipient_count) * 100) : 0;
       const label = engRate >= 30 ? "🔥 High" : engRate >= 10 ? "✅ Good" : "⚠️ Low";
-      return { ...b, engRate, engLabel: label };
+      return { ...b, replies_24h: replies24h, engRate, engLabel: label };
     });
 
     res.json({
