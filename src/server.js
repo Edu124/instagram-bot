@@ -3367,12 +3367,16 @@ app.post("/api/promote/flash", async (req, res) => {
   const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
   const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
   const fullMsg = message + productBlock + "\n\nReply with a product name to order! 👇";
-  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
+  const { data: allRows = [] } = await supabaseAdmin
+    .from("bot_customers").select("id, name")
+    .or(`business_id.eq.${bid},business_id.eq.default`);
   let sent = 0;
-  for (const c of allCustomers) {
+  for (const c of allRows) {
     try { await wa.send(c.id, fullMsg, phoneId, token); session.update(c.id, { promoSource: "flash_sale", promoSentAt: Date.now() }); sent++; } catch {}
+    if (sent % 10 === 0 && sent > 0) await new Promise(r => setTimeout(r, 1000));
   }
-  res.json({ ok: true, sent, total: allCustomers.length });
+  logBroadcast(bid, "flash_sale", message.slice(0, 150), sent);
+  res.json({ ok: true, sent, total: allRows.length });
 });
 
 app.post("/api/promote/newarrival", async (req, res) => {
@@ -3398,12 +3402,16 @@ app.post("/api/promote/newarrival", async (req, res) => {
   const header = message || "🆕 *New Arrivals are here!* Check out what's fresh 👇";
   const fullMsg = `${header}\n\n${productLines}\nReply with a product name to order!`;
 
-  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
+  const { data: allRows = [] } = await supabaseAdmin
+    .from("bot_customers").select("id, name")
+    .or(`business_id.eq.${bid},business_id.eq.default`);
   let sent = 0;
-  for (const c of allCustomers) {
+  for (const c of allRows) {
     try { await wa.send(c.id, fullMsg, phoneId, token); session.update(c.id, { promoSource: "new_arrival", promoSentAt: Date.now() }); sent++; } catch {}
+    if (sent % 10 === 0 && sent > 0) await new Promise(r => setTimeout(r, 1000));
   }
-  res.json({ ok: true, sent });
+  logBroadcast(bid, "new_arrival", header.slice(0, 150), sent);
+  res.json({ ok: true, sent, total: allRows.length });
 });
 
 app.post("/api/promote/abandoned", async (req, res) => {
@@ -3420,28 +3428,38 @@ app.post("/api/promote/video", async (req, res) => {
   const numInfo = await waNumbers.getByBusinessId(bid);
   const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
   const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
-  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
+
+  // Fetch ALL customers — no page limit for blasts
+  const { data: allRows = [] } = await supabaseAdmin
+    .from("bot_customers")
+    .select("id, name, tags, total_orders, first_seen_at, last_active_at")
+    .or(`business_id.eq.${bid},business_id.eq.default`);
 
   // Filter by segment
-  const targets = allCustomers.filter(c => {
-    if (segment === "all")      return true;
+  const now = Date.now();
+  const targets = allRows.filter(c => {
     if (segment === "vip")      return (c.tags || []).includes("vip");
-    if (segment === "repeat")   return (c.totalOrders || 0) >= 2;
-    if (segment === "new")      return c.firstSeenAt && (Date.now() - new Date(c.firstSeenAt).getTime()) < 30 * 86400000;
-    if (segment === "inactive") return c.lastActiveAt && (Date.now() - new Date(c.lastActiveAt).getTime()) > 60 * 86400000;
-    return true;
+    if (segment === "repeat")   return (c.total_orders || 0) >= 2;
+    if (segment === "new")      return c.first_seen_at && (now - Number(c.first_seen_at)) < 30 * 86400000;
+    if (segment === "inactive") return c.last_active_at && (now - Number(c.last_active_at)) > 60 * 86400000;
+    return true; // "all"
   });
 
-  let sent = 0;
+  let sent = 0, failed = 0;
   for (const c of targets) {
     try {
       await wa.sendVideo(c.id, videoUrl, caption, phoneId, token);
       sent++;
+      session.update(c.id, { promoSource: "video_blast", promoSentAt: now });
     } catch (e) {
-      console.warn(`[VideoBlast] Failed to send to ${c.id}:`, e.message);
+      failed++;
+      console.warn(`[VideoBlast] Failed ${c.id}:`, e.message);
     }
+    // Small delay to avoid Meta rate limits (avoid bursting 100 messages at once)
+    if (sent % 10 === 0) await new Promise(r => setTimeout(r, 1000));
   }
-  res.json({ ok: true, sent, total: targets.length });
+  logBroadcast(bid, "video", caption || "Video broadcast", sent);
+  res.json({ ok: true, sent, failed, total: targets.length });
 });
 
 // POST /api/promote/upload — save a base64 file to public/media/, return URL
@@ -3475,27 +3493,36 @@ app.post("/api/promote/image", async (req, res) => {
   const numInfo = await waNumbers.getByBusinessId(bid);
   const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
   const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
-  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
-  const targets = allCustomers.filter(c => {
-    if (segment === "all")      return true;
+
+  // Fetch ALL customers — no page limit for blasts
+  const { data: allRows = [] } = await supabaseAdmin
+    .from("bot_customers")
+    .select("id, name, tags, total_orders, first_seen_at, last_active_at")
+    .or(`business_id.eq.${bid},business_id.eq.default`);
+
+  const now = Date.now();
+  const targets = allRows.filter(c => {
     if (segment === "vip")      return (c.tags || []).includes("vip");
-    if (segment === "repeat")   return (c.totalOrders || 0) >= 2;
-    if (segment === "new")      return c.firstSeenAt && (Date.now() - new Date(c.firstSeenAt).getTime()) < 30 * 86400000;
-    if (segment === "inactive") return c.lastActiveAt && (Date.now() - new Date(c.lastActiveAt).getTime()) > 60 * 86400000;
-    return true;
+    if (segment === "repeat")   return (c.total_orders || 0) >= 2;
+    if (segment === "new")      return c.first_seen_at && (now - Number(c.first_seen_at)) < 30 * 86400000;
+    if (segment === "inactive") return c.last_active_at && (now - Number(c.last_active_at)) > 60 * 86400000;
+    return true; // "all"
   });
 
-  let sent = 0;
+  let sent = 0, failed = 0;
   for (const c of targets) {
     try {
       await wa.sendImage(c.id, imageUrl, caption, phoneId, token);
       sent++;
+      session.update(c.id, { promoSource: "image_blast", promoSentAt: now });
     } catch (e) {
+      failed++;
       console.warn(`[ImageBlast] Failed ${c.id}:`, e.message);
     }
+    if (sent % 10 === 0) await new Promise(r => setTimeout(r, 1000));
   }
   logBroadcast(bid, "image", caption || "Image broadcast", sent);
-  res.json({ ok: true, sent, total: targets.length });
+  res.json({ ok: true, sent, failed, total: targets.length });
 });
 
 // POST /api/promote/pdf — blast a PDF/document to all/segment customers (or students)
@@ -3507,26 +3534,36 @@ app.post("/api/promote/pdf", async (req, res) => {
   const numInfo = await waNumbers.getByBusinessId(bid);
   const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
   const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
-  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
-  const targets = allCustomers.filter(c => {
-    if (segment === "all")      return true;
+
+  // Fetch ALL customers — no page limit for blasts
+  const { data: allRows = [] } = await supabaseAdmin
+    .from("bot_customers")
+    .select("id, name, tags, total_orders, first_seen_at, last_active_at")
+    .or(`business_id.eq.${bid},business_id.eq.default`);
+
+  const now = Date.now();
+  const targets = allRows.filter(c => {
     if (segment === "vip")      return (c.tags || []).includes("vip");
-    if (segment === "repeat")   return (c.totalOrders || 0) >= 2;
-    if (segment === "new")      return c.firstSeenAt && (Date.now() - new Date(c.firstSeenAt).getTime()) < 30 * 86400000;
-    if (segment === "inactive") return c.lastActiveAt && (Date.now() - new Date(c.lastActiveAt).getTime()) > 60 * 86400000;
-    return true;
+    if (segment === "repeat")   return (c.total_orders || 0) >= 2;
+    if (segment === "new")      return c.first_seen_at && (now - Number(c.first_seen_at)) < 30 * 86400000;
+    if (segment === "inactive") return c.last_active_at && (now - Number(c.last_active_at)) > 60 * 86400000;
+    return true; // "all"
   });
 
-  let sent = 0;
+  let sent = 0, failed = 0;
   for (const c of targets) {
     try {
       await wa.sendDocument(c.id, pdfUrl, filename, caption, phoneId, token);
       sent++;
+      session.update(c.id, { promoSource: "pdf_blast", promoSentAt: now });
     } catch (e) {
+      failed++;
       console.warn(`[PdfBlast] Failed ${c.id}:`, e.message);
     }
+    if (sent % 10 === 0) await new Promise(r => setTimeout(r, 1000));
   }
-  res.json({ ok: true, sent, total: targets.length });
+  logBroadcast(bid, "pdf", filename || "PDF broadcast", sent);
+  res.json({ ok: true, sent, failed, total: targets.length });
 });
 
 // POST /api/customers/import — bulk add existing contacts (students) to the list
@@ -3664,7 +3701,13 @@ app.post("/api/promote/segment", async (req, res) => {
   const numInfo = await waNumbers.getByBusinessId(bid);
   const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
   const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
-  const { customers: allCustomers = [] } = await customers.getAll({ businessId: bid });
+
+  // Fetch ALL customers from Supabase — no page limit
+  const { data: allRows = [] } = await supabaseAdmin
+    .from("bot_customers")
+    .select("id, name, tags, total_orders, total_spend, first_seen_at, last_active_at")
+    .or(`business_id.eq.${bid},business_id.eq.default`);
+
   const now = Date.now();
   const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
   const SIXTY_DAYS  = 60 * 24 * 60 * 60 * 1000;
@@ -3672,19 +3715,19 @@ app.post("/api/promote/segment", async (req, res) => {
   let targets;
   switch (segment) {
     case "vip":
-      targets = allCustomers.filter(c => (c.totalSpend || 0) >= 5000);
+      targets = allRows.filter(c => Number(c.total_spend || 0) >= 5000);
       break;
     case "new":
-      targets = allCustomers.filter(c => (now - (c.firstSeenAt || 0)) < THIRTY_DAYS);
+      targets = allRows.filter(c => (now - Number(c.first_seen_at || 0)) < THIRTY_DAYS);
       break;
     case "inactive":
-      targets = allCustomers.filter(c => (now - (c.lastActiveAt || 0)) > SIXTY_DAYS);
+      targets = allRows.filter(c => (now - Number(c.last_active_at || 0)) > SIXTY_DAYS);
       break;
     case "repeat":
-      targets = allCustomers.filter(c => (c.totalOrders || 0) >= 2);
+      targets = allRows.filter(c => (c.total_orders || 0) >= 2);
       break;
     default:
-      targets = allCustomers;
+      targets = allRows;
   }
 
   // Build product block
@@ -3707,8 +3750,10 @@ app.post("/api/promote/segment", async (req, res) => {
       session.update(c.id, { promoSource: "segment_" + segment, promoSentAt: now });
       sent++;
     } catch {}
+    if (sent % 10 === 0 && sent > 0) await new Promise(r => setTimeout(r, 1000));
   }
 
+  logBroadcast(bid, "segment_" + segment, message.slice(0, 150), sent);
   console.log(`[Segment] ${segment} broadcast sent to ${sent}/${targets.length}`);
   res.json({ ok: true, sent, total: targets.length, segment });
 });
