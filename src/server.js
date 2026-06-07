@@ -166,10 +166,13 @@ async function groqAnswer(question, industry = "", businessName = "", faqContext
       max_tokens : faqOnly ? 120 : 350,   // FAQ: short answer only; doubt: allow explanation
       temperature: faqOnly ? 0.1 : 0.4,  // FAQ: very deterministic; doubt: slight creativity
     });
+    let settled = false;
+    const done = (val) => { if (!settled) { settled = true; resolve(val); } };
     const req = https.request({
       hostname: "api.groq.com",
       path    : "/openai/v1/chat/completions",
       method  : "POST",
+      timeout : 25000,
       headers : { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
     }, (res) => {
       let data = "";
@@ -178,11 +181,12 @@ async function groqAnswer(question, industry = "", businessName = "", faqContext
         try {
           const parsed = JSON.parse(data);
           if (parsed.error) console.error("[Groq] API error:", JSON.stringify(parsed.error));
-          resolve(parsed.choices?.[0]?.message?.content?.trim() || null);
-        } catch (e) { console.error("[Groq] Parse error:", e.message); resolve(null); }
+          done(parsed.choices?.[0]?.message?.content?.trim() || null);
+        } catch (e) { console.error("[Groq] Parse error:", e.message); done(null); }
       });
     });
-    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); console.warn("[Groq] Request timed out"); done(null); });
+    req.on("error", () => done(null));
     req.write(body);
     req.end();
   });
@@ -206,10 +210,13 @@ async function groqVisionAnswer(imageUrl, industry = "", businessName = "", lang
       max_tokens : 600,
       temperature: 0.4,
     });
+    let settled = false;
+    const done = (val) => { if (!settled) { settled = true; resolve(val); } };
     const req = https.request({
       hostname: "api.groq.com",
       path    : "/openai/v1/chat/completions",
       method  : "POST",
+      timeout : 25000,
       headers : { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
     }, (res) => {
       let data = "";
@@ -218,11 +225,12 @@ async function groqVisionAnswer(imageUrl, industry = "", businessName = "", lang
         try {
           const parsed = JSON.parse(data);
           if (parsed.error) console.error("[Groq Vision] API error:", JSON.stringify(parsed.error));
-          resolve(parsed.choices?.[0]?.message?.content?.trim() || null);
-        } catch (e) { console.error("[Groq Vision] Parse error:", e.message); resolve(null); }
+          done(parsed.choices?.[0]?.message?.content?.trim() || null);
+        } catch (e) { console.error("[Groq Vision] Parse error:", e.message); done(null); }
       });
     });
-    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); console.warn("[Groq Vision] Request timed out"); done(null); });
+    req.on("error", () => done(null));
     req.write(body);
     req.end();
   });
@@ -4808,12 +4816,16 @@ ${text.slice(0, 2000)}`;
     const body = JSON.stringify({ model: "llama3-8b-8192", messages: [{ role: "user", content: prompt }], max_tokens: 800, temperature: 0.1 });
     const https = require("https");
     const result = await new Promise((resolve, reject) => {
+      let settled = false;
+      const done = (fn, val) => { if (!settled) { settled = true; fn(val); } };
       const r = https.request(
         { hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          timeout: 25000,
           headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
-        (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>{ try{resolve(JSON.parse(d))}catch{reject(new Error("parse"))} }); }
+        (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>{ try{done(resolve,JSON.parse(d))}catch{done(reject,new Error("parse"))} }); }
       );
-      r.on("error", reject); r.write(body); r.end();
+      r.on("timeout", () => { r.destroy(); done(reject, new Error("AI request timed out. Please try again.")); });
+      r.on("error", (e) => done(reject, e)); r.write(body); r.end();
     });
     const raw = result?.choices?.[0]?.message?.content?.trim() || "[]";
     const jsonMatch = raw.match(/\[[\s\S]*\]/);
@@ -4856,12 +4868,16 @@ Keep it under 100 words, be specific.`;
     const body = JSON.stringify({ model: "llama3-8b-8192", messages: [{ role: "user", content: prompt }], max_tokens: 300, temperature: 0.6 });
     const https = require("https");
     const result = await new Promise((resolve, reject) => {
+      let settled = false;
+      const done = (fn, val) => { if (!settled) { settled = true; fn(val); } };
       const r = https.request(
         { hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          timeout: 25000,
           headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
-        (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>{ try{resolve(JSON.parse(d))}catch{reject(new Error("parse"))} }); }
+        (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>{ try{done(resolve,JSON.parse(d))}catch{done(reject,new Error("parse"))} }); }
       );
-      r.on("error", reject); r.write(body); r.end();
+      r.on("timeout", () => { r.destroy(); done(reject, new Error("AI request timed out. Please try again.")); });
+      r.on("error", (e) => done(reject, e)); r.write(body); r.end();
     });
     const text = result?.choices?.[0]?.message?.content?.trim() || "";
     res.json({ suggestion: text, stats: { orders: parseInt(stats.orders||0), avgOrder: Math.round(stats.avg_order||0) } });
@@ -4941,18 +4957,22 @@ app.post("/api/ai/generate", async (req, res) => {
     });
     const result = await new Promise((resolve, reject) => {
       const https = require("https");
+      let settled = false;
+      const done = (fn, val) => { if (!settled) { settled = true; fn(val); } };
       const reqHttp = https.request(
         { hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          timeout: 25000,
           headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
         (resp) => {
           let data = "";
           resp.on("data", c => data += c);
           resp.on("end", () => {
-            try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); }
+            try { done(resolve, JSON.parse(data)); } catch { done(reject, new Error("Parse error")); }
           });
         }
       );
-      reqHttp.on("error", reject);
+      reqHttp.on("timeout", () => { reqHttp.destroy(); done(reject, new Error("AI request timed out. Please try again.")); });
+      reqHttp.on("error", (e) => done(reject, e));
       reqHttp.write(body);
       reqHttp.end();
     });
@@ -5194,18 +5214,22 @@ app.post("/api/ai/insights", async (req, res) => {
     });
     const result = await new Promise((resolve, reject) => {
       const https = require("https");
+      let settled = false;
+      const done = (fn, val) => { if (!settled) { settled = true; fn(val); } };
       const reqHttp = https.request(
         { hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          timeout: 25000,
           headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
         (resp) => {
           let data = "";
           resp.on("data", c => data += c);
           resp.on("end", () => {
-            try { resolve(JSON.parse(data)); } catch { reject(new Error("Parse error")); }
+            try { done(resolve, JSON.parse(data)); } catch { done(reject, new Error("Parse error")); }
           });
         }
       );
-      reqHttp.on("error", reject);
+      reqHttp.on("timeout", () => { reqHttp.destroy(); done(reject, new Error("AI request timed out. Please try again.")); });
+      reqHttp.on("error", (e) => done(reject, e));
       reqHttp.write(body);
       reqHttp.end();
     });
