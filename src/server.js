@@ -4922,16 +4922,17 @@ app.get("/api/ai/status", (req, res) => {
 });
 
 // POST /api/ai/generate — caption / reel script / product description writer
-// Body: { type, context, industry, businessName, tone }
-// type: "caption" | "broadcast" | "instagram" | "reel" | "description" | "reel_script" | "flashcard" | "quiz"
+// Body: { type, context, industry, businessName, tone, chapters }
+// type: "caption" | "broadcast" | "instagram" | "reel" | "description" | "reel_script" | "flashcard" | "quiz" | "book"
 app.post("/api/ai/generate", async (req, res) => {
   if (!GROQ_API_KEY) return res.status(503).json({ error: "GROQ_API_KEY not set on Railway. Add it under your service Variables and redeploy." });
   const bid = getBid(req);
-  const { type = "caption", context = "", industry = "product", businessName = "", tone = "friendly" } = req.body;
+  const { type = "caption", context = "", industry = "product", businessName = "", tone = "friendly", chapters = 5 } = req.body;
   if (!context.trim()) return res.status(400).json({ error: "context is required" });
 
   const biz = businessName || "a small business";
   const ind = industry;
+  const numChapters = Math.min(Math.max(parseInt(chapters) || 5, 1), 15); // clamp 1–15
   const prompts = {
     // Instagram / social captions
     caption  : `You are a social media expert for ${biz} (${ind}). Write a catchy Instagram caption with emojis and 5 relevant hashtags. Under 150 words. Tone: ${tone}.\n\nContext: ${context}`,
@@ -4946,26 +4947,54 @@ app.post("/api/ai/generate", async (req, res) => {
     flashcard: `You are an education expert. Create 8 question-answer flashcards for this topic. Return ONLY valid JSON array: [{"q":"Question?","a":"Answer"},...]. No extra text.\n\nTopic: ${context}`,
     flashcards: `You are an education expert. Create 8 question-answer flashcards for this topic. Return ONLY valid JSON array: [{"q":"Question?","a":"Answer"},...]. No extra text.\n\nTopic: ${context}`,
     quiz: `You are an education expert. Create 5 multiple-choice quiz questions. Format: Q: [question]\nA) [opt]\nB) [opt]\nC) [opt]\nD) [opt]\nAnswer: [letter]\n\nTopic: ${context}`,
+    // AI Books — structured study material with multiple chapters
+    book: `You are an expert educator creating a comprehensive study guide. Write a well-structured study book on: "${context}"
+
+Structure it EXACTLY as follows:
+# [Book Title]
+
+## Introduction
+[2-3 sentences overview]
+
+${Array.from({ length: numChapters }, (_, i) => `## Chapter ${i + 1}: [Chapter Title]
+### Key Concepts
+- [concept 1]
+- [concept 2]
+- [concept 3]
+
+### Explanation
+[3-4 sentences explaining the chapter content in detail]
+
+### Summary
+[1-2 sentences summarizing the chapter]`).join("\n\n")}
+
+## Conclusion
+[2-3 sentences wrapping up the entire topic]
+
+Write each chapter with meaningful, educational content. Do NOT skip any chapter. Total: ${numChapters * 120 + 200} words minimum.`,
     // Instagram post caption (from video/image posting)
     instagram_video: `You are a social media expert for ${biz}. Write an Instagram Reel caption with emojis and 5 hashtags for this video content. Under 100 words.\n\nContext: ${context}`,
   };
 
   const systemPrompt = prompts[type] || prompts.caption;
+  // Book type needs much higher token limit; other types stay short
+  const maxTokens = type === "book" ? Math.min(numChapters * 350 + 500, 6000) : 800;
 
   try {
     const body = JSON.stringify({
       model: "llama-3.1-8b-instant",
       messages: [{ role: "user", content: systemPrompt }],
-      max_tokens: 800,
-      temperature: 0.8,
+      max_tokens: maxTokens,
+      temperature: type === "book" ? 0.6 : 0.8,
     });
     const result = await new Promise((resolve, reject) => {
       const https = require("https");
       let settled = false;
       const done = (fn, val) => { if (!settled) { settled = true; fn(val); } };
+      const reqTimeout = type === "book" ? 55000 : 25000; // books need more time
       const reqHttp = https.request(
         { hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
-          timeout: 25000,
+          timeout: reqTimeout,
           headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
         (resp) => {
           let data = "";
