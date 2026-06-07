@@ -2980,11 +2980,15 @@ app.post("/api/batches/:batchName/flashcards", async (req, res) => {
     return res.status(400).json({ error: "cards array required" });
   try {
     // Get all students in this batch
-    const { rows: students } = await db.query(
-      `SELECT id, name FROM bot_customers WHERE (business_id=$1 OR business_id='default') AND batch=$2`,
-      [bid, batchName]
-    );
-    if (students.length === 0)
+    // bot_customers lives in Supabase — must NOT use db (Railway Postgres)
+    const { supabaseAdmin: supa } = require("./supabase");
+    const { data: students = [], error: stuErr } = await supa
+      .from("bot_customers")
+      .select("id, name")
+      .or(`business_id.eq.${bid},business_id.eq.default`)
+      .eq("batch", batchName);
+    if (stuErr) throw new Error(stuErr.message);
+    if (!students.length)
       return res.status(404).json({ error: `No students found in batch "${batchName}"` });
 
     // Get WhatsApp credentials for this business
@@ -3582,10 +3586,10 @@ app.post("/api/promote/pdf", async (req, res) => {
 // completes in ~1 second instead of timing out.
 app.post("/api/customers/import", async (req, res) => {
   const bid = req.headers["x-business-id"] || req.query.bid || DEFAULT_BUSINESS_ID;
-  const { contacts = [] } = req.body;
+  const { contacts = [], batch = "" } = req.body;
   if (!contacts.length) return res.status(400).json({ error: "No contacts provided" });
   try {
-    const result = await customers.bulkImport(contacts, bid);
+    const result = await customers.bulkImport(contacts, bid, batch);
     res.json({ ok: true, ...result });
   } catch (e) {
     console.error("[Import] bulk import error:", e.message);

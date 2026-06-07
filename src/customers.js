@@ -240,7 +240,7 @@ function _toCustomer(row) {
 // ── Bulk import contacts (phone book / manual CSV) ────────────────────────────
 // Single Supabase upsert instead of N sequential SELECT+INSERT calls.
 // ignoreDuplicates keeps existing bot customers intact (their order history, tags etc.)
-async function bulkImport(contacts, businessId = DEFAULT_BID) {
+async function bulkImport(contacts, businessId = DEFAULT_BID, batch = "") {
   const rows = contacts
     .map(({ name, phone }) => {
       const digits = (phone || "").replace(/[^0-9]/g, "");
@@ -248,7 +248,7 @@ async function bulkImport(contacts, businessId = DEFAULT_BID) {
       // so imported contacts match the IDs the bot assigns when they message in.
       const id = digits.length === 10 ? "91" + digits : digits;
       if (id.length < 10) return null;
-      return {
+      const row = {
         id,
         business_id      : businessId,
         name             : (name || "").trim() || "Contact",
@@ -263,6 +263,8 @@ async function bulkImport(contacts, businessId = DEFAULT_BID) {
         order_ids        : [],
         tags             : [],
       };
+      if (batch) row.batch = batch.trim();
+      return row;
     })
     .filter(Boolean);
 
@@ -271,7 +273,7 @@ async function bulkImport(contacts, businessId = DEFAULT_BID) {
 
   const { error } = await supabaseAdmin
     .from("bot_customers")
-    .upsert(rows, { onConflict: "id", ignoreDuplicates: true });
+    .upsert(rows, { onConflict: "id", ignoreDuplicates: false }); // ignoreDuplicates:false so batch gets updated on re-import
 
   if (error) throw new Error(error.message);
   return { imported: rows.length, skipped };
