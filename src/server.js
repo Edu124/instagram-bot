@@ -3773,15 +3773,24 @@ app.post("/api/promote/segment", async (req, res) => {
   }
 
   const fullMsg = message + productBlock + "\n\nReply with a product name to order! 👇";
+  // Normalise phone number to E.164 (no +, with country code)
+  const normalizePhone = (num) => {
+    let n = String(num || "").replace(/\D/g, ""); // strip non-digits
+    if (n.length === 10 && /^[6-9]/.test(n)) n = "91" + n; // Indian mobile
+    if (n.startsWith("0")) n = "91" + n.slice(1);           // 0XXXXXXXXXX → 91XXXXXXXXXX
+    return n;
+  };
+
   let sent = 0;
   let firstErr = null;
   console.log(`[Segment] starting blast: segment=${segment} template=${waTemplateName || "none"} targets=${targets.length} phoneId=${phoneId ? phoneId.slice(0,6)+"…" : "MISSING"} token=${token ? "set" : "MISSING"}`);
   for (const c of targets) {
     try {
+      const to = normalizePhone(c.id);
       if (waTemplateName) {
-        await wa.sendTemplate(c.id, waTemplateName, waTemplateLang, [], phoneId, token);
+        await wa.sendTemplate(to, waTemplateName, waTemplateLang, [], phoneId, token);
       } else {
-        await wa.send(c.id, fullMsg, phoneId, token);
+        await wa.send(to, fullMsg, phoneId, token);
       }
       session.update(c.id, { promoSource: "segment_" + segment, promoSentAt: now });
       sent++;
