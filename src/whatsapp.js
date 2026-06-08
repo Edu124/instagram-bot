@@ -88,8 +88,8 @@ function apiPost(path, bodyStr, token = WA_TOKEN) {
       res.on("end", () => {
         try {
           const parsed = JSON.parse(data);
-          if (parsed.error) console.error("[WhatsApp API Error]", parsed.error.message);
-          else console.log("[WhatsApp] Message sent ✓");
+          if (parsed.error) console.error("[WhatsApp API Error]", JSON.stringify(parsed.error));
+          else console.log("[WhatsApp] Message sent ✓ id=", parsed.messages?.[0]?.id, "status=", parsed.messages?.[0]?.message_status);
           resolve(parsed);
         } catch { resolve({}); }
       });
@@ -204,6 +204,7 @@ async function sendTemplate(to, templateName, languageCode = "en", variables = [
     },
   });
 
+  console.log(`[WA Template] to=${to} template=${templateName} lang=${languageCode} phoneId=${phoneId?.slice(0,6)}…`);
   return apiPost(`/${phoneId}/messages`, body, token);
 }
 
