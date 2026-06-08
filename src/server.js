@@ -3774,11 +3774,11 @@ app.post("/api/promote/segment", async (req, res) => {
 
   const fullMsg = message + productBlock + "\n\nReply with a product name to order! 👇";
   let sent = 0;
+  let firstErr = null;
+  console.log(`[Segment] starting blast: segment=${segment} template=${waTemplateName || "none"} targets=${targets.length} phoneId=${phoneId ? phoneId.slice(0,6)+"…" : "MISSING"} token=${token ? "set" : "MISSING"}`);
   for (const c of targets) {
     try {
       if (waTemplateName) {
-        // Send approved template — required for inactive (outside 24h window)
-        // Pass student/customer name as first variable {{1}}
         const firstName = (c.name || "there").split(" ")[0];
         await wa.sendTemplate(c.id, waTemplateName, waTemplateLang, [firstName], phoneId, token);
       } else {
@@ -3786,10 +3786,16 @@ app.post("/api/promote/segment", async (req, res) => {
       }
       session.update(c.id, { promoSource: "segment_" + segment, promoSentAt: now });
       sent++;
-    } catch {}
+    } catch (err) {
+      if (!firstErr) {
+        firstErr = err.message || String(err);
+        console.error(`[Segment] first send error (customer ${c.id}): ${firstErr}`);
+      }
+    }
     if (sent % 10 === 0 && sent > 0) await new Promise(r => setTimeout(r, 1000));
   }
 
+  if (firstErr) console.error(`[Segment] blast finished with errors. first: ${firstErr}`);
   logBroadcast(bid, "segment_" + segment, message.slice(0, 150), sent);
   console.log(`[Segment] ${segment} broadcast: ${waTemplateName ? `template "${waTemplateName}"` : "text"} → ${sent}/${targets.length}`);
   res.json({ ok: true, sent, total: targets.length, segment, templateUsed: waTemplateName || null });
