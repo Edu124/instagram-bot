@@ -90,6 +90,7 @@ function apiPost(path, bodyStr, token = WA_TOKEN) {
           const parsed = JSON.parse(data);
           if (parsed.error) console.error("[WhatsApp API Error]", JSON.stringify(parsed.error));
           else console.log("[WhatsApp] Message sent ✓ id=", parsed.messages?.[0]?.id, "status=", parsed.messages?.[0]?.message_status);
+          console.log("[WhatsApp] Full response:", JSON.stringify(parsed).slice(0, 500));
           resolve(parsed);
         } catch { resolve({}); }
       });
