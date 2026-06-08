@@ -3847,6 +3847,8 @@ app.post("/api/settings", async (req, res) => {
     "whatsapp_enabled","instagram_enabled", // channel toggles
     "instagram_access_token","instagram_account_id", // per-business Instagram credentials
     "return_policy",                                  // customer-facing return / refund policy
+    "payment_modes",                                  // COD / online / both
+    "wa_template_name","wa_template_lang",            // WhatsApp re-engagement template
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {
