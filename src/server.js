@@ -3711,8 +3711,8 @@ app.get("/api/tracking/:awb", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/api/promote/segment", async (req, res) => {
   const bid = getBid(req);
-  const { segment = "all", message, productIds = [] } = req.body;
-  if (!message) return res.status(400).json({ error: "message required" });
+  const { segment = "all", message, productIds = [], useTemplate = false } = req.body;
+  if (!message && !useTemplate) return res.status(400).json({ error: "message required" });
 
   const numInfo = await waNumbers.getByBusinessId(bid);
   const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
