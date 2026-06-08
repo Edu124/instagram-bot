@@ -3781,32 +3781,37 @@ app.post("/api/promote/segment", async (req, res) => {
     return n;
   };
 
-  let sent = 0;
-  let firstErr = null;
-  console.log(`[Segment] starting blast: segment=${segment} template=${waTemplateName || "none"} targets=${targets.length} phoneId=${phoneId ? phoneId.slice(0,6)+"…" : "MISSING"} token=${token ? "set" : "MISSING"}`);
-  for (const c of targets) {
-    try {
-      const to = normalizePhone(c.id);
-      if (waTemplateName) {
-        await wa.sendTemplate(to, waTemplateName, waTemplateLang, [], phoneId, token);
-      } else {
-        await wa.send(to, fullMsg, phoneId, token);
-      }
-      session.update(c.id, { promoSource: "segment_" + segment, promoSentAt: now });
-      sent++;
-    } catch (err) {
-      if (!firstErr) {
-        firstErr = err.message || String(err);
-        console.error(`[Segment] first send error (customer ${c.id}): ${firstErr}`);
-      }
-    }
-    if (sent % 10 === 0 && sent > 0) await new Promise(r => setTimeout(r, 1000));
-  }
+  // Respond immediately so the app doesn't timeout on large blasts (500+ students)
+  // The actual sending runs in the background on the server
+  res.json({ ok: true, queued: true, total: targets.length, segment, templateUsed: waTemplateName || null });
 
-  if (firstErr) console.error(`[Segment] blast finished with errors. first: ${firstErr}`);
-  logBroadcast(bid, "segment_" + segment, message.slice(0, 150), sent);
-  console.log(`[Segment] ${segment} broadcast: ${waTemplateName ? `template "${waTemplateName}"` : "text"} → ${sent}/${targets.length}`);
-  res.json({ ok: true, sent, total: targets.length, segment, templateUsed: waTemplateName || null });
+  // Run blast in background — Railway 30s proxy timeout won't affect this
+  setImmediate(async () => {
+    let sent = 0;
+    let firstErr = null;
+    console.log(`[Segment] starting blast: segment=${segment} template=${waTemplateName || "none"} targets=${targets.length} phoneId=${phoneId ? phoneId.slice(0,6)+"…" : "MISSING"} token=${token ? "set" : "MISSING"}`);
+    for (const c of targets) {
+      try {
+        const to = normalizePhone(c.id);
+        if (waTemplateName) {
+          await wa.sendTemplate(to, waTemplateName, waTemplateLang, [], phoneId, token);
+        } else {
+          await wa.send(to, fullMsg, phoneId, token);
+        }
+        session.update(c.id, { promoSource: "segment_" + segment, promoSentAt: now });
+        sent++;
+      } catch (err) {
+        if (!firstErr) {
+          firstErr = err.message || String(err);
+          console.error(`[Segment] first send error (customer ${c.id}): ${firstErr}`);
+        }
+      }
+      if (sent % 10 === 0 && sent > 0) await new Promise(r => setTimeout(r, 1000));
+    }
+    if (firstErr) console.error(`[Segment] blast finished with errors. first: ${firstErr}`);
+    logBroadcast(bid, "segment_" + segment, message.slice(0, 150), sent);
+    console.log(`[Segment] ${segment} broadcast: ${waTemplateName ? `template "${waTemplateName}"` : "text"} → ${sent}/${targets.length}`);
+  });
 });
 
 // ── Business Settings ─────────────────────────────────────────────────────────
