@@ -3746,7 +3746,21 @@ app.post("/api/promote/segment", async (req, res) => {
       targets = allRows;
   }
 
-  // Build product block
+  // Use approved WhatsApp template if configured — applies to ALL segments
+  // (required for inactive users >24h, but works for active users too)
+  let waTemplateName = null;
+  let waTemplateLang = "en";
+  try {
+    const { data: settingsRows } = await supabaseAdmin
+      .from("business_settings")
+      .select("wa_template_name, wa_template_lang")
+      .eq("business_id", bid)
+      .single();
+    waTemplateName = settingsRows?.wa_template_name?.trim() || null;
+    waTemplateLang = settingsRows?.wa_template_lang?.trim() || "en";
+  } catch {}
+
+  // Build product block (for non-template sends)
   let productBlock = "";
   if (productIds.length > 0) {
     const prods = await Promise.all(productIds.map(id => catalog.get(id)));
@@ -3762,7 +3776,14 @@ app.post("/api/promote/segment", async (req, res) => {
   let sent = 0;
   for (const c of targets) {
     try {
-      await wa.send(c.id, fullMsg, phoneId, token);
+      if (waTemplateName) {
+        // Send approved template — required for inactive (outside 24h window)
+        // Pass student/customer name as first variable {{1}}
+        const firstName = (c.name || "there").split(" ")[0];
+        await wa.sendTemplate(c.id, waTemplateName, waTemplateLang, [firstName], phoneId, token);
+      } else {
+        await wa.send(c.id, fullMsg, phoneId, token);
+      }
       session.update(c.id, { promoSource: "segment_" + segment, promoSentAt: now });
       sent++;
     } catch {}
@@ -3770,8 +3791,8 @@ app.post("/api/promote/segment", async (req, res) => {
   }
 
   logBroadcast(bid, "segment_" + segment, message.slice(0, 150), sent);
-  console.log(`[Segment] ${segment} broadcast sent to ${sent}/${targets.length}`);
-  res.json({ ok: true, sent, total: targets.length, segment });
+  console.log(`[Segment] ${segment} broadcast: ${waTemplateName ? `template "${waTemplateName}"` : "text"} → ${sent}/${targets.length}`);
+  res.json({ ok: true, sent, total: targets.length, segment, templateUsed: waTemplateName || null });
 });
 
 // ── Business Settings ─────────────────────────────────────────────────────────
