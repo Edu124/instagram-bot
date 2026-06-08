@@ -176,6 +176,37 @@ async function sendDocument(to, docUrl, filename = "Document.pdf", caption = "",
   return apiPost(`/${phoneId}/messages`, body, token);
 }
 
+// ── Send an approved WhatsApp template message ────────────────────────────────
+// Used for re-engaging inactive users (>24h window) where plain text is blocked.
+// variables: array of text strings for {{1}}, {{2}}... placeholders in the template body.
+async function sendTemplate(to, templateName, languageCode = "en", variables = [], phoneId = PHONE_ID, token = WA_TOKEN) {
+  if (!token || !phoneId) {
+    console.log(`[WhatsApp MOCK] → ${to}: [TEMPLATE] ${templateName} vars=${JSON.stringify(variables)}`);
+    return;
+  }
+
+  const components = [];
+  if (variables.length > 0) {
+    components.push({
+      type      : "body",
+      parameters: variables.map(v => ({ type: "text", text: String(v).slice(0, 1024) })),
+    });
+  }
+
+  const body = JSON.stringify({
+    messaging_product: "whatsapp",
+    to,
+    type    : "template",
+    template: {
+      name    : templateName,
+      language: { code: languageCode },
+      ...(components.length ? { components } : {}),
+    },
+  });
+
+  return apiPost(`/${phoneId}/messages`, body, token);
+}
+
 function sanitize(text) { return text.slice(0, 4096); }
 
 // ── Resolve WhatsApp media ID → Meta's temp download URL ─────────────────────
@@ -225,4 +256,4 @@ function downloadMedia(url, token = WA_TOKEN) {
   });
 }
 
-module.exports = { send, sendProductCards, sendQuickReplies, sendInvoice, markReadAndType, sendVideo, sendImage, sendDocument, resolveMediaUrl, downloadMedia };
+module.exports = { send, sendProductCards, sendQuickReplies, sendInvoice, markReadAndType, sendVideo, sendImage, sendDocument, sendTemplate, resolveMediaUrl, downloadMedia };
