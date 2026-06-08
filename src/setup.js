@@ -414,6 +414,21 @@ async function setup() {
   await db.query(`CREATE INDEX IF NOT EXISTS salary_bid_idx ON salary_records(business_id)`);
   await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS salary_emp_month ON salary_records(employee_id, month)`);
 
+  // ── flashcard_sets ────────────────────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS flashcard_sets (
+      id          TEXT PRIMARY KEY,
+      business_id TEXT NOT NULL DEFAULT 'default',
+      topic       TEXT NOT NULL DEFAULT '',
+      cards       JSONB NOT NULL DEFAULT '[]',
+      expires_at  TIMESTAMPTZ NOT NULL DEFAULT '2099-12-31',
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS flashcard_sets_bid_idx ON flashcard_sets(business_id)`);
+  // Migration: fix any existing rows that have a short expiry — make them permanent
+  await db.query(`UPDATE flashcard_sets SET expires_at = '2099-12-31' WHERE expires_at < NOW() + INTERVAL '365 days'`).catch(() => {});
+
   console.log("[Setup] All tables ready ✓");
 }
 

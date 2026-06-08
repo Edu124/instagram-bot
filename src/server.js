@@ -2895,8 +2895,9 @@ app.post("/api/flashcard-sets", async (req, res) => {
   try {
     const id  = require("crypto").randomBytes(8).toString("hex"); // short unique ID
     await db.query(
-      `INSERT INTO flashcard_sets (id, business_id, topic, cards)
-       VALUES ($1, $2, $3, $4)`,
+      `INSERT INTO flashcard_sets (id, business_id, topic, cards, expires_at)
+       VALUES ($1, $2, $3, $4, '2099-12-31')
+       ON CONFLICT (id) DO NOTHING`,
       [id, bid, topic.trim(), JSON.stringify(cards)]
     );
     const BASE_URL = (process.env.BASE_URL || "https://instagram-bot-production-04ae.up.railway.app").replace(/\/$/, "");
@@ -2907,10 +2908,10 @@ app.post("/api/flashcard-sets", async (req, res) => {
 app.get("/flashcards/:id", async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT topic, cards FROM flashcard_sets WHERE id=$1 AND expires_at > NOW()`,
+      `SELECT topic, cards FROM flashcard_sets WHERE id=$1`,
       [req.params.id]
     );
-    if (!rows.length) return res.status(404).send("<h2>Flashcard set not found or expired.</h2>");
+    if (!rows.length) return res.status(404).send("<h2>Flashcard set not found.</h2>");
     const { topic, cards } = rows[0];
     const cardArr = Array.isArray(cards) ? cards : JSON.parse(cards);
 
@@ -3001,7 +3002,7 @@ app.post("/api/batches/:batchName/flashcards", async (req, res) => {
     // Save flashcard set and generate shareable web link
     const setId  = require("crypto").randomBytes(8).toString("hex");
     await db.query(
-      `INSERT INTO flashcard_sets (id, business_id, topic, cards) VALUES ($1,$2,$3,$4)`,
+      `INSERT INTO flashcard_sets (id, business_id, topic, cards, expires_at) VALUES ($1,$2,$3,$4,'2099-12-31')`,
       [setId, bid, topic || batchName, JSON.stringify(cards)]
     ).catch(() => {}); // non-fatal if table doesn't exist yet
     const BASE_URL = (process.env.BASE_URL || "https://instagram-bot-production-04ae.up.railway.app").replace(/\/$/, "");
