@@ -3779,8 +3779,7 @@ app.post("/api/promote/segment", async (req, res) => {
   for (const c of targets) {
     try {
       if (waTemplateName) {
-        const firstName = (c.name || "there").split(" ")[0];
-        await wa.sendTemplate(c.id, waTemplateName, waTemplateLang, [firstName], phoneId, token);
+        await wa.sendTemplate(c.id, waTemplateName, waTemplateLang, [], phoneId, token);
       } else {
         await wa.send(c.id, fullMsg, phoneId, token);
       }
