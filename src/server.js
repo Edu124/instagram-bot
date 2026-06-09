@@ -440,6 +440,16 @@ app.post("/webhook/whatsapp", async (req, res) => {
         const value    = change.value;
         const messages = value?.messages || [];
 
+        // ── Log delivery status updates from Meta ────────────────────────
+        const statuses = value?.statuses || [];
+        for (const s of statuses) {
+          if (s.errors?.length) {
+            console.error(`[WA Status] ❌ FAILED id=${s.id} to=${s.recipient_id} err=${JSON.stringify(s.errors)}`);
+          } else {
+            console.log(`[WA Status] ✓ ${s.status?.toUpperCase()} id=${s.id?.slice(-12)} to=${s.recipient_id}`);
+          }
+        }
+
         // ── Skip status-only payloads (sent/delivered/read receipts) ─────
         // Meta sends statuses in the same webhook. If there are no messages
         // but there are statuses, this is a delivery receipt — ignore it.
