@@ -3711,7 +3711,7 @@ app.get("/api/tracking/:awb", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/api/promote/segment", async (req, res) => {
   const bid = getBid(req);
-  const { segment = "all", message, productIds = [], useTemplate = false } = req.body;
+  const { segment = "all", message, productIds = [], useTemplate = false, customTargets = null } = req.body;
   if (!message && !useTemplate) return res.status(400).json({ error: "message required" });
 
   const numInfo = await waNumbers.getByBusinessId(bid);
@@ -3741,6 +3741,9 @@ app.post("/api/promote/segment", async (req, res) => {
       break;
     case "repeat":
       targets = allRows.filter(c => (c.total_orders || 0) >= 2);
+      break;
+    case "manual":
+      targets = customTargets?.length ? allRows.filter(c => customTargets.includes(c.id)) : [];
       break;
     default:
       targets = allRows;

@@ -187,13 +187,6 @@ async function sendTemplate(to, templateName, languageCode = "en", variables = [
   }
 
   const components = [];
-  // Header component — required if template has an image/document header
-  if (headerMediaId) {
-    components.push({
-      type      : "header",
-      parameters: [{ type: "image", image: { id: String(headerMediaId) } }],
-    });
-  }
   // Body variables e.g. {{1}}, {{2}}
   if (variables.length > 0) {
     components.push({
