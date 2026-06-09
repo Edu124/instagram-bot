@@ -3748,16 +3748,18 @@ app.post("/api/promote/segment", async (req, res) => {
 
   // Use approved WhatsApp template if configured — applies to ALL segments
   // (required for inactive users >24h, but works for active users too)
-  let waTemplateName = null;
-  let waTemplateLang = "en";
+  let waTemplateName     = null;
+  let waTemplateLang     = "en";
+  let waTemplateHeaderId = null;
   try {
     const { data: settingsRows } = await supabaseAdmin
       .from("business_settings")
-      .select("wa_template_name, wa_template_lang")
+      .select("wa_template_name, wa_template_lang, wa_template_header_id")
       .eq("business_id", bid)
       .single();
-    waTemplateName = settingsRows?.wa_template_name?.trim() || null;
-    waTemplateLang = settingsRows?.wa_template_lang?.trim() || "en";
+    waTemplateName     = settingsRows?.wa_template_name?.trim()      || null;
+    waTemplateLang     = settingsRows?.wa_template_lang?.trim()      || "en";
+    waTemplateHeaderId = settingsRows?.wa_template_header_id?.trim() || null;
   } catch {}
 
   // Build product block (for non-template sends)
@@ -3794,7 +3796,7 @@ app.post("/api/promote/segment", async (req, res) => {
       try {
         const to = normalizePhone(c.id);
         if (waTemplateName) {
-          await wa.sendTemplate(to, waTemplateName, waTemplateLang, [], phoneId, token);
+          await wa.sendTemplate(to, waTemplateName, waTemplateLang, [], phoneId, token, waTemplateHeaderId);
         } else {
           await wa.send(to, fullMsg, phoneId, token);
         }
@@ -3867,7 +3869,7 @@ app.post("/api/settings", async (req, res) => {
     "instagram_access_token","instagram_account_id", // per-business Instagram credentials
     "return_policy",                                  // customer-facing return / refund policy
     "payment_modes",                                  // COD / online / both
-    "wa_template_name","wa_template_lang",            // WhatsApp re-engagement template
+    "wa_template_name","wa_template_lang","wa_template_header_id", // WhatsApp re-engagement template
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {

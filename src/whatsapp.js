@@ -180,13 +180,21 @@ async function sendDocument(to, docUrl, filename = "Document.pdf", caption = "",
 // ── Send an approved WhatsApp template message ────────────────────────────────
 // Used for re-engaging inactive users (>24h window) where plain text is blocked.
 // variables: array of text strings for {{1}}, {{2}}... placeholders in the template body.
-async function sendTemplate(to, templateName, languageCode = "en", variables = [], phoneId = PHONE_ID, token = WA_TOKEN) {
+async function sendTemplate(to, templateName, languageCode = "en", variables = [], phoneId = PHONE_ID, token = WA_TOKEN, headerMediaId = null) {
   if (!token || !phoneId) {
     console.log(`[WhatsApp MOCK] → ${to}: [TEMPLATE] ${templateName} vars=${JSON.stringify(variables)}`);
     return;
   }
 
   const components = [];
+  // Header component — required if template has an image/document header
+  if (headerMediaId) {
+    components.push({
+      type      : "header",
+      parameters: [{ type: "image", image: { id: String(headerMediaId) } }],
+    });
+  }
+  // Body variables e.g. {{1}}, {{2}}
   if (variables.length > 0) {
     components.push({
       type      : "body",
