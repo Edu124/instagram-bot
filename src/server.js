@@ -3955,7 +3955,7 @@ app.post("/api/promote/segment", async (req, res) => {
     if (firstErr) console.error(`[Segment] blast finished with errors. first: ${firstErr}`);
     // Update final sent count on the log (already created before blast)
     await db.query(`UPDATE broadcast_logs SET recipient_count=$1 WHERE id=$2`, [sent, blastId]).catch(() => {});
-    console.log(`[Segment] ${segment} broadcast: ${waTemplateName ? `template "${waTemplateName}"` : "text"} → ${sent}/${finalTargets.length}`);
+    console.log(`[Segment] ${segment} broadcast: ${useTemplate && waTemplateName ? `template "${waTemplateName}"` : "custom text"} → ${sent}/${finalTargets.length}`);
   });
 });
 
@@ -5317,7 +5317,7 @@ app.get("/api/ai/engagement", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /api/ai/blast-detail/:id — failed/delivered numbers for a specific blast
+// GET /api/ai/blast-detail/:id — failed/delivered/read numbers for a specific blast
 app.get("/api/ai/blast-detail/:id", async (req, res) => {
   const bid = getBid(req);
   try {
@@ -5329,9 +5329,66 @@ app.get("/api/ai/blast-detail/:id", async (req, res) => {
       [req.params.id, bid]
     );
     const failed    = rows.filter(r => r.status === "failed");
-    const delivered = rows.filter(r => r.status === "delivered" || r.status === "read");
+    const delivered = rows.filter(r => r.status === "delivered");
+    const read      = rows.filter(r => r.status === "read");
     const pending   = rows.filter(r => r.status === "sent" || r.status === "queued");
-    res.json({ ok: true, failed, delivered, pending, total: rows.length });
+    res.json({ ok: true, failed, delivered, read, pending, total: rows.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/ai/customer-profile/:phone — basic customer info when tapping a number in blast detail
+app.get("/api/ai/customer-profile/:phone", async (req, res) => {
+  const bid   = getBid(req);
+  const phone = req.params.phone;
+  try {
+    const { supabaseAdmin: supa } = require("./supabase");
+    const { data } = await supa.from("bot_customers")
+      .select("id, name, phone, last_active_at, tags, opted_out, template_last_sent_at")
+      .eq("phone", phone)
+      .or(`business_id.eq.${bid},business_id.eq.default`)
+      .limit(1);
+    const customer = data?.[0] || null;
+    let recentOrder = null;
+    if (customer?.id) {
+      const ordMod   = require("./orders");
+      const ordRows  = await ordMod.getByCustomer(customer.id);
+      recentOrder = ordRows?.[0] || null;
+    }
+    res.json({ ok: true, customer, recentOrder });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/ai/send-direct — send custom message or template to specific phone numbers
+app.post("/api/ai/send-direct", async (req, res) => {
+  const bid = getBid(req);
+  const { phones, message, useTemplate, templateName, templateLang } = req.body || {};
+  if (!phones?.length) return res.status(400).json({ ok: false, error: "No phones provided" });
+  try {
+    const settings = await getSettings(bid);
+    const phoneId  = settings.wa_phone_id   || settings.phone_number_id || "";
+    const token    = settings.wa_token      || settings.whatsapp_token  || "";
+    if (!phoneId || !token) return res.status(400).json({ ok: false, error: "WhatsApp not configured in settings" });
+    const tName = templateName || (settings.wa_template_name || "").trim();
+    const tLang = templateLang || "en";
+    let sent = 0, failed = 0;
+    const errors = [];
+    for (const rawPhone of phones) {
+      const to = normalizePhone(rawPhone);
+      try {
+        if (useTemplate && tName) {
+          await wa.sendTemplate(to, tName, tLang, [], phoneId, token);
+        } else if (message?.trim()) {
+          await wa.send(to, message.trim(), phoneId, token);
+        } else {
+          continue;
+        }
+        sent++;
+      } catch (e) {
+        failed++;
+        errors.push({ phone: to, error: e.message });
+      }
+    }
+    res.json({ ok: true, sent, failed, errors });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
