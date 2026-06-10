@@ -487,6 +487,42 @@ app.post("/webhook/whatsapp", async (req, res) => {
             continue;
           }
 
+          // ── STOP / opt-out detection ──────────────────────────────────────
+          const rawText = (msg.text?.body || "").trim();
+          if (/^(stop|unsubscribe|opt.?out|stopp?ed?|ruko|band\s?karo|mat\s?bhejo)$/i.test(rawText)) {
+            console.log(`[Opt-out] ${senderId} sent STOP — marking opted_out`);
+            await db.query(
+              `UPDATE bot_customers SET opted_out=TRUE, opted_out_at=NOW() WHERE id=$1`,
+              [senderId]
+            ).catch(e => console.error("[Opt-out] DB error:", e.message));
+            await wa.send(senderId,
+              "✅ You have been unsubscribed from broadcast messages.\n\n" +
+              "You will no longer receive promotional messages from us.\n" +
+              "To re-subscribe at any time, reply *START*.",
+              incomingPhoneId, routedToken
+            ).catch(() => {});
+            continue;
+          }
+
+          // ── START / re-subscribe ──────────────────────────────────────────────
+          if (/^(start|subscribe|haan|yes|ok)$/i.test(rawText)) {
+            const { rows: optRows } = await db.query(
+              `SELECT opted_out FROM bot_customers WHERE id=$1`, [senderId]
+            ).catch(() => ({ rows: [] }));
+            if (optRows[0]?.opted_out) {
+              await db.query(
+                `UPDATE bot_customers SET opted_out=FALSE, opted_out_at=NULL WHERE id=$1`,
+                [senderId]
+              ).catch(() => {});
+              await wa.send(senderId,
+                "✅ You have been re-subscribed to updates from us. Welcome back! 😊",
+                incomingPhoneId, routedToken
+              ).catch(() => {});
+              console.log(`[Opt-in] ${senderId} re-subscribed`);
+              continue;
+            }
+          }
+
           const name       = value.contacts?.[0]?.profile?.name || "Customer";
           const first_name = name.split(" ")[0];
           const last_name  = name.split(" ").slice(1).join(" ");
@@ -3395,7 +3431,8 @@ app.post("/api/promote/flash", async (req, res) => {
   const fullMsg = message + productBlock + "\n\nReply with a product name to order! 👇";
   const { data: allRows = [] } = await supabaseAdmin
     .from("bot_customers").select("id, name")
-    .or(`business_id.eq.${bid},business_id.eq.default`);
+    .or(`business_id.eq.${bid},business_id.eq.default`)
+    .neq("opted_out", true);
   let sent = 0;
   for (const c of allRows) {
     try { await wa.send(c.id, fullMsg, phoneId, token); session.update(c.id, { promoSource: "flash_sale", promoSentAt: Date.now() }); sent++; } catch {}
@@ -3430,7 +3467,8 @@ app.post("/api/promote/newarrival", async (req, res) => {
 
   const { data: allRows = [] } = await supabaseAdmin
     .from("bot_customers").select("id, name")
-    .or(`business_id.eq.${bid},business_id.eq.default`);
+    .or(`business_id.eq.${bid},business_id.eq.default`)
+    .neq("opted_out", true);
   let sent = 0;
   for (const c of allRows) {
     try { await wa.send(c.id, fullMsg, phoneId, token); session.update(c.id, { promoSource: "new_arrival", promoSentAt: Date.now() }); sent++; } catch {}
@@ -3459,7 +3497,8 @@ app.post("/api/promote/video", async (req, res) => {
   const { data: allRows = [] } = await supabaseAdmin
     .from("bot_customers")
     .select("id, name, tags, total_orders, first_seen_at, last_active_at")
-    .or(`business_id.eq.${bid},business_id.eq.default`);
+    .or(`business_id.eq.${bid},business_id.eq.default`)
+    .neq("opted_out", true);
 
   // Filter by segment
   const now = Date.now();

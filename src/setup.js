@@ -81,6 +81,9 @@ async function setup() {
   // Add batch column for education class grouping (migration for existing tables)
   await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS batch TEXT NOT NULL DEFAULT ''`);
   await db.query(`CREATE INDEX IF NOT EXISTS customers_batch_idx ON bot_customers(batch)`);
+  // Opt-out columns — for STOP keyword handling
+  await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS opted_out BOOLEAN NOT NULL DEFAULT FALSE`);
+  await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS opted_out_at TIMESTAMPTZ`);
 
   // ── loyalty_points ────────────────────────────────────────────────────────────
   await db.query(`
