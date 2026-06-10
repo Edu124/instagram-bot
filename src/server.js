@@ -354,6 +354,15 @@ async function sendReplies(to, text, replies) {
 
 const DEFAULT_BUSINESS_ID = process.env.BUSINESS_ID || "default";
 
+// ── Phone number normalisation (E.164, no +, with country code) ──────────────
+// Handles 10-digit Indian mobiles, 0XXXXXXXXXX, and already-full numbers.
+function normalizePhone(num) {
+  let n = String(num || "").replace(/\D/g, "");
+  if (n.length === 10 && /^[6-9]/.test(n)) n = "91" + n;
+  if (n.startsWith("0")) n = "91" + n.slice(1);
+  return n;
+}
+
 // ── WhatsApp message deduplication ────────────────────────────────────────────
 // Meta retries webhooks and sometimes delivers the same message ID twice.
 // We cache processed message IDs for 10 minutes to silently drop duplicates.
@@ -1410,7 +1419,41 @@ async function handleSearch(customerId, sess, message, name) {
       hinglish: `Hey ${name}! 👋 Welcome to *${bizName}*!\n\nKya dhundh rahe ho? Bolo!\nExample: ${exampleHinglish}`,
       english : `Hi ${name}! 👋 Welcome to *${bizName}*!\n\nWhat are you looking for today?\nExample: ${exampleEnglish}`,
     };
-    return send(customerId, greets[lang] || greets.english);
+    await send(customerId, greets[lang] || greets.english);
+
+    // ── Auto-trigger approved WA template (7-day cooldown) ───────────────────
+    const templateName = (bizSettings.wa_template_name || "").trim();
+    const templateLang = (bizSettings.wa_template_lang || "en").trim();
+    if (templateName) {
+      try {
+        const { rows: tRows } = await db.query(
+          `SELECT template_last_sent_at FROM bot_customers WHERE id=$1`,
+          [customerId]
+        );
+        const lastSent     = tRows[0]?.template_last_sent_at;
+        const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        if (!lastSent || new Date(lastSent).getTime() < sevenDaysAgo) {
+          const bizId2  = sess.businessId || DEFAULT_BUSINESS_ID;
+          const numInfo = await waNumbers.getByBusinessId(bizId2).catch(() => null);
+          const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
+          const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
+          const to      = normalizePhone(customerId);
+          await wa.sendTemplate(to, templateName, templateLang, [], phoneId, token).catch(e =>
+            console.error("[Auto-template] send failed:", e.message)
+          );
+          await db.query(
+            `UPDATE bot_customers SET template_last_sent_at=NOW() WHERE id=$1`,
+            [customerId]
+          ).catch(() => {});
+          console.log(`[Auto-template] ✓ Sent "${templateName}" to ${to}`);
+        } else {
+          console.log(`[Auto-template] Skipped ${customerId} — sent within last 7 days`);
+        }
+      } catch (e) {
+        console.error("[Auto-template] error:", e.message);
+      }
+    }
+    return;
   }
 
   const bizId = sess.businessId || DEFAULT_BUSINESS_ID;
@@ -3827,28 +3870,44 @@ app.post("/api/promote/segment", async (req, res) => {
   }
 
   const fullMsg = message + productBlock + "\n\nReply with a product name to order! 👇";
-  // Normalise phone number to E.164 (no +, with country code)
-  const normalizePhone = (num) => {
-    let n = String(num || "").replace(/\D/g, ""); // strip non-digits
-    if (n.length === 10 && /^[6-9]/.test(n)) n = "91" + n; // Indian mobile
-    if (n.startsWith("0")) n = "91" + n.slice(1);           // 0XXXXXXXXXX → 91XXXXXXXXXX
-    return n;
-  };
+
+  // 7-day cooldown: when sending template, skip students who already received it recently
+  let finalTargets = targets;
+  if (waTemplateName) {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: cooldownRows = [] } = await supabaseAdmin
+      .from("bot_customers")
+      .select("id, template_last_sent_at")
+      .or(`business_id.eq.${bid},business_id.eq.default`);
+    const recentSet = new Set(
+      cooldownRows
+        .filter(r => r.template_last_sent_at && r.template_last_sent_at > sevenDaysAgo)
+        .map(r => r.id)
+    );
+    const skipped = targets.filter(c => recentSet.has(c.id)).length;
+    finalTargets   = targets.filter(c => !recentSet.has(c.id));
+    if (skipped > 0) console.log(`[Segment] 7-day cooldown: skipping ${skipped} students who received template recently`);
+  }
 
   // Respond immediately so the app doesn't timeout on large blasts (500+ students)
   // The actual sending runs in the background on the server
-  res.json({ ok: true, queued: true, total: targets.length, segment, templateUsed: waTemplateName || null });
+  res.json({ ok: true, queued: true, total: finalTargets.length, segment, templateUsed: waTemplateName || null });
 
   // Run blast in background — Railway 30s proxy timeout won't affect this
   setImmediate(async () => {
     let sent = 0;
     let firstErr = null;
-    console.log(`[Segment] starting blast: segment=${segment} template=${waTemplateName || "none"} targets=${targets.length} phoneId=${phoneId ? phoneId.slice(0,6)+"…" : "MISSING"} token=${token ? "set" : "MISSING"}`);
-    for (const c of targets) {
+    console.log(`[Segment] starting blast: segment=${segment} template=${waTemplateName || "none"} targets=${finalTargets.length} phoneId=${phoneId ? phoneId.slice(0,6)+"…" : "MISSING"} token=${token ? "set" : "MISSING"}`);
+    for (const c of finalTargets) {
       try {
         const to = normalizePhone(c.id);
         if (waTemplateName) {
           await wa.sendTemplate(to, waTemplateName, waTemplateLang, [], phoneId, token, waTemplateHeaderId);
+          // Stamp template_last_sent_at so 7-day cooldown works on next blast
+          await db.query(
+            `UPDATE bot_customers SET template_last_sent_at=NOW() WHERE id=$1`,
+            [c.id]
+          ).catch(() => {});
         } else {
           await wa.send(to, fullMsg, phoneId, token);
         }
@@ -3864,7 +3923,7 @@ app.post("/api/promote/segment", async (req, res) => {
     }
     if (firstErr) console.error(`[Segment] blast finished with errors. first: ${firstErr}`);
     logBroadcast(bid, "segment_" + segment, message.slice(0, 150), sent);
-    console.log(`[Segment] ${segment} broadcast: ${waTemplateName ? `template "${waTemplateName}"` : "text"} → ${sent}/${targets.length}`);
+    console.log(`[Segment] ${segment} broadcast: ${waTemplateName ? `template "${waTemplateName}"` : "text"} → ${sent}/${finalTargets.length}`);
   });
 });
 

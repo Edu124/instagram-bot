@@ -84,6 +84,8 @@ async function setup() {
   // Opt-out columns — for STOP keyword handling
   await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS opted_out BOOLEAN NOT NULL DEFAULT FALSE`);
   await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS opted_out_at TIMESTAMPTZ`);
+  // Template send tracking — 7-day cooldown for auto-trigger and manual blasts
+  await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS template_last_sent_at TIMESTAMPTZ`);
 
   // ── loyalty_points ────────────────────────────────────────────────────────────
   await db.query(`
