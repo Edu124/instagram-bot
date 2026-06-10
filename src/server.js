@@ -3873,7 +3873,7 @@ app.post("/api/promote/segment", async (req, res) => {
 
   // 7-day cooldown: when sending template, skip students who already received it recently
   let finalTargets = targets;
-  if (waTemplateName) {
+  if (useTemplate && waTemplateName) {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const { data: cooldownRows = [] } = await supabaseAdmin
       .from("bot_customers")
@@ -3901,7 +3901,7 @@ app.post("/api/promote/segment", async (req, res) => {
     for (const c of finalTargets) {
       try {
         const to = normalizePhone(c.id);
-        if (waTemplateName) {
+        if (useTemplate && waTemplateName) {
           await wa.sendTemplate(to, waTemplateName, waTemplateLang, [], phoneId, token, waTemplateHeaderId);
           // Stamp template_last_sent_at so 7-day cooldown works on next blast
           await db.query(
