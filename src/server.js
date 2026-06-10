@@ -457,6 +457,27 @@ app.post("/webhook/whatsapp", async (req, res) => {
           } else {
             console.log(`[WA Status] ✓ ${s.status?.toUpperCase()} id=${s.id?.slice(-12)} to=${s.recipient_id}`);
           }
+          // Update broadcast_messages and aggregate counts in broadcast_logs
+          if (s.id) {
+            try {
+              const errorCode = s.errors?.[0]?.code || null;
+              const errorMsg  = s.errors?.[0]?.message || null;
+              const { rowCount } = await db.query(
+                `UPDATE broadcast_messages SET status=$1, error_code=$2, error_message=$3, updated_at=NOW() WHERE wamid=$4`,
+                [s.status || "unknown", errorCode, errorMsg, s.id]
+              );
+              if (rowCount > 0) {
+                // Update aggregate counts on the blast log
+                if (s.status === "delivered") {
+                  await db.query(`UPDATE broadcast_logs SET delivered_count = delivered_count + 1 WHERE id = (SELECT blast_id FROM broadcast_messages WHERE wamid=$1 LIMIT 1)`, [s.id]).catch(() => {});
+                } else if (s.status === "read") {
+                  await db.query(`UPDATE broadcast_logs SET read_count = read_count + 1 WHERE id = (SELECT blast_id FROM broadcast_messages WHERE wamid=$1 LIMIT 1)`, [s.id]).catch(() => {});
+                } else if (s.status === "failed") {
+                  await db.query(`UPDATE broadcast_logs SET failed_count = failed_count + 1 WHERE id = (SELECT blast_id FROM broadcast_messages WHERE wamid=$1 LIMIT 1)`, [s.id]).catch(() => {});
+                }
+              }
+            } catch (e) { console.warn("[WA Status] DB update failed:", e.message); }
+          }
         }
 
         // ── Skip status-only payloads (sent/delivered/read receipts) ─────
@@ -3889,6 +3910,9 @@ app.post("/api/promote/segment", async (req, res) => {
     if (skipped > 0) console.log(`[Segment] 7-day cooldown: skipping ${skipped} students who received template recently`);
   }
 
+  // Create broadcast log BEFORE blast so we have the ID for per-message tracking
+  const blastId = await logBroadcast(bid, "segment_" + segment, (useTemplate && waTemplateName) ? `[Template] ${waTemplateName}` : message.slice(0, 150), finalTargets.length, useTemplate && !!waTemplateName);
+
   // Respond immediately so the app doesn't timeout on large blasts (500+ students)
   // The actual sending runs in the background on the server
   res.json({ ok: true, queued: true, total: finalTargets.length, segment, templateUsed: waTemplateName || null });
@@ -3901,16 +3925,20 @@ app.post("/api/promote/segment", async (req, res) => {
     for (const c of finalTargets) {
       try {
         const to = normalizePhone(c.id);
+        let result;
         if (useTemplate && waTemplateName) {
-          await wa.sendTemplate(to, waTemplateName, waTemplateLang, [], phoneId, token, waTemplateHeaderId);
+          result = await wa.sendTemplate(to, waTemplateName, waTemplateLang, [], phoneId, token, waTemplateHeaderId);
           // Stamp template_last_sent_at so 7-day cooldown works on next blast
           await db.query(
             `UPDATE bot_customers SET template_last_sent_at=NOW() WHERE id=$1`,
             [c.id]
           ).catch(() => {});
         } else {
-          await wa.send(to, fullMsg, phoneId, token);
+          result = await wa.send(to, fullMsg, phoneId, token);
         }
+        // Track per-message delivery with wamid
+        const wamid = result?.messages?.[0]?.id || null;
+        await recordMessageDelivery(blastId, bid, to, wamid, wamid ? "sent" : "queued");
         session.update(c.id, { promoSource: "segment_" + segment, promoSentAt: now });
         sent++;
       } catch (err) {
@@ -3918,11 +3946,15 @@ app.post("/api/promote/segment", async (req, res) => {
           firstErr = err.message || String(err);
           console.error(`[Segment] first send error (customer ${c.id}): ${firstErr}`);
         }
+        // Record failed message
+        await recordMessageDelivery(blastId, bid, normalizePhone(c.id), null, "failed", null, firstErr);
+        await db.query(`UPDATE broadcast_logs SET failed_count = failed_count + 1 WHERE id=$1`, [blastId]).catch(() => {});
       }
       if (sent % 10 === 0 && sent > 0) await new Promise(r => setTimeout(r, 1000));
     }
     if (firstErr) console.error(`[Segment] blast finished with errors. first: ${firstErr}`);
-    logBroadcast(bid, "segment_" + segment, message.slice(0, 150), sent);
+    // Update final sent count on the log (already created before blast)
+    await db.query(`UPDATE broadcast_logs SET recipient_count=$1 WHERE id=$2`, [sent, blastId]).catch(() => {});
     console.log(`[Segment] ${segment} broadcast: ${waTemplateName ? `template "${waTemplateName}"` : "text"} → ${sent}/${finalTargets.length}`);
   });
 });
@@ -5178,16 +5210,30 @@ Write each chapter with meaningful, educational content. Do NOT skip any chapter
   }
 });
 
-// ── Broadcast log helper (fire-and-forget, won't crash callers) ───────────────
-async function logBroadcast(bid, type, preview, recipientCount) {
+// ── Broadcast log helper — returns blast ID so delivery can be tracked ────────
+async function logBroadcast(bid, type, preview, recipientCount, useTemplate = false) {
+  const id = require("crypto").randomUUID();
+  try {
+    await db.query(
+      `INSERT INTO broadcast_logs (id, business_id, type, message_preview, recipient_count, use_template)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [id, bid, type, (preview || "").slice(0, 150), recipientCount || 0, useTemplate]
+    );
+  } catch (e) { console.warn("[broadcast log]", e.message); }
+  return id;
+}
+
+// ── Record individual message delivery status ─────────────────────────────────
+async function recordMessageDelivery(blastId, bid, recipientPhone, wamid, status = "queued", errorCode = null, errorMsg = null) {
   try {
     const id = require("crypto").randomUUID();
     await db.query(
-      `INSERT INTO broadcast_logs (id, business_id, type, message_preview, recipient_count)
-       VALUES ($1,$2,$3,$4,$5)`,
-      [id, bid, type, (preview || "").slice(0, 150), recipientCount || 0]
+      `INSERT INTO broadcast_messages (id, blast_id, business_id, recipient_phone, wamid, status, error_code, error_message)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (id) DO NOTHING`,
+      [id, blastId, bid, recipientPhone, wamid || null, status, errorCode, errorMsg ? String(errorMsg).slice(0, 255) : null]
     );
-  } catch (e) { console.warn("[broadcast log]", e.message); }
+  } catch (e) { console.warn("[broadcast msg]", e.message); }
 }
 
 // GET /api/ai/engagement — WhatsApp student engagement stats
@@ -5205,9 +5251,17 @@ app.get("/api/ai/engagement", async (req, res) => {
       supa.from("bot_customers")
         .select("last_active_at", { count: "exact" })
         .or(`business_id.eq.${bid},business_id.eq.default`),
-      db.query(`SELECT id, type, message_preview, recipient_count, replies_1h, replies_24h, replies_7d, reply_count, sent_at
-                FROM broadcast_logs WHERE business_id=$1
-                ORDER BY sent_at DESC LIMIT 10`, [bid]),
+      db.query(`SELECT bl.id, bl.type, bl.message_preview, bl.recipient_count,
+                       bl.delivered_count, bl.failed_count, bl.read_count, bl.use_template,
+                       bl.replies_1h, bl.replies_24h, bl.replies_7d, bl.reply_count, bl.sent_at,
+                       COUNT(bm.id) FILTER (WHERE bm.status='failed') AS live_failed,
+                       COUNT(bm.id) FILTER (WHERE bm.status='delivered') AS live_delivered,
+                       COUNT(bm.id) FILTER (WHERE bm.status='read') AS live_read
+                FROM broadcast_logs bl
+                LEFT JOIN broadcast_messages bm ON bm.blast_id = bl.id
+                WHERE bl.business_id=$1
+                GROUP BY bl.id
+                ORDER BY bl.sent_at DESC LIMIT 15`, [bid]),
     ]);
 
     const rows    = allRows.data || [];
@@ -5239,11 +5293,17 @@ app.get("/api/ai/engagement", async (req, res) => {
 
     // Enrich broadcasts with engagement rate + label
     const broadcasts = broadcastR.rows.map(b => {
-      const replies24h = b.replies_24h || b.reply_count || 0;
-      const engRate    = b.recipient_count > 0
-        ? Math.round((replies24h / b.recipient_count) * 100) : 0;
-      const label = engRate >= 30 ? "🔥 High" : engRate >= 10 ? "✅ Good" : "⚠️ Low";
-      return { ...b, replies_24h: replies24h, engRate, engLabel: label };
+      const replies24h   = b.replies_24h || b.reply_count || 0;
+      const delivered    = Number(b.live_delivered) || Number(b.delivered_count) || 0;
+      const failed       = Number(b.live_failed)    || Number(b.failed_count)    || 0;
+      const readCount    = Number(b.live_read)       || Number(b.read_count)      || 0;
+      const sent         = Number(b.recipient_count) || 0;
+      const deliveryRate = sent > 0 ? Math.round((delivered / sent) * 100) : 0;
+      const failRate     = sent > 0 ? Math.round((failed    / sent) * 100) : 0;
+      const engRate      = sent > 0 ? Math.round((replies24h / sent) * 100) : 0;
+      const delivLabel   = deliveryRate >= 80 ? "🟢" : deliveryRate >= 50 ? "🟡" : delivered === 0 && sent > 0 ? "🔴" : "⚪";
+      const engLabel     = engRate >= 30 ? "🔥 High" : engRate >= 10 ? "✅ Good" : "⚠️ Low";
+      return { ...b, replies_24h: replies24h, delivered, failed, readCount, deliveryRate, failRate, engRate, engLabel, delivLabel };
     });
 
     res.json({
@@ -5254,6 +5314,24 @@ app.get("/api/ai/engagement", async (req, res) => {
       broadcasts,
       reengageTip: tip,
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/ai/blast-detail/:id — failed/delivered numbers for a specific blast
+app.get("/api/ai/blast-detail/:id", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    const { rows } = await db.query(
+      `SELECT recipient_phone, status, error_code, error_message, sent_at, updated_at
+       FROM broadcast_messages
+       WHERE blast_id=$1 AND business_id=$2
+       ORDER BY status, sent_at`,
+      [req.params.id, bid]
+    );
+    const failed    = rows.filter(r => r.status === "failed");
+    const delivered = rows.filter(r => r.status === "delivered" || r.status === "read");
+    const pending   = rows.filter(r => r.status === "sent" || r.status === "queued");
+    res.json({ ok: true, failed, delivered, pending, total: rows.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

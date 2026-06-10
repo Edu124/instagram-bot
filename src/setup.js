@@ -294,6 +294,31 @@ async function setup() {
   `);
   await db.query(`CREATE INDEX IF NOT EXISTS wa_numbers_bid_idx ON whatsapp_numbers(business_id)`);
 
+  // ── broadcast_messages — per-recipient delivery tracking ─────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS broadcast_messages (
+      id              TEXT PRIMARY KEY,
+      blast_id        TEXT NOT NULL,
+      business_id     TEXT NOT NULL,
+      recipient_phone TEXT NOT NULL,
+      wamid           TEXT,
+      status          TEXT NOT NULL DEFAULT 'queued',
+      error_code      INTEGER,
+      error_message   TEXT,
+      sent_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await db.query(`CREATE INDEX IF NOT EXISTS bm_wamid_idx    ON broadcast_messages(wamid)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS bm_blast_idx    ON broadcast_messages(blast_id)`);
+  await db.query(`CREATE INDEX IF NOT EXISTS bm_bid_idx      ON broadcast_messages(business_id)`);
+
+  // ── broadcast_logs — add delivery aggregate columns ──────────────────────────
+  await db.query(`ALTER TABLE broadcast_logs ADD COLUMN IF NOT EXISTS delivered_count INTEGER NOT NULL DEFAULT 0`);
+  await db.query(`ALTER TABLE broadcast_logs ADD COLUMN IF NOT EXISTS failed_count    INTEGER NOT NULL DEFAULT 0`);
+  await db.query(`ALTER TABLE broadcast_logs ADD COLUMN IF NOT EXISTS read_count      INTEGER NOT NULL DEFAULT 0`);
+  await db.query(`ALTER TABLE broadcast_logs ADD COLUMN IF NOT EXISTS use_template    BOOLEAN NOT NULL DEFAULT false`);
+
   // ── Column migrations (safe on existing Railway PG DBs) ──────────────────────
   // NOTE: Also run these in Supabase SQL editor (business_settings is authoritative there):
   //   ALTER TABLE business_settings ADD COLUMN IF NOT EXISTS faq_text         TEXT NOT NULL DEFAULT '';
