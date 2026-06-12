@@ -86,6 +86,9 @@ async function setup() {
   await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS opted_out_at TIMESTAMPTZ`);
   // Template send tracking — 7-day cooldown for auto-trigger and manual blasts
   await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS template_last_sent_at TIMESTAMPTZ`);
+  // Last inbound message — lets blast reports show what the customer replied
+  await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS last_message TEXT`);
+  await db.query(`ALTER TABLE bot_customers ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ`);
 
   // ── loyalty_points ────────────────────────────────────────────────────────────
   await db.query(`

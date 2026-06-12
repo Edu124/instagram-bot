@@ -517,8 +517,16 @@ app.post("/webhook/whatsapp", async (req, res) => {
             continue;
           }
 
+          // ── Capture latest inbound message (blast reply tracking) ────────
+          const rawText = (msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || "").trim();
+          if (rawText) {
+            db.query(
+              `UPDATE bot_customers SET last_message=$1, last_message_at=NOW() WHERE id=$2`,
+              [rawText.slice(0, 500), senderId]
+            ).catch(() => {});
+          }
+
           // ── STOP / opt-out detection ──────────────────────────────────────
-          const rawText = (msg.text?.body || "").trim();
           if (/^(stop|unsubscribe|opt.?out|stopp?ed?|ruko|band\s?karo|mat\s?bhejo)$/i.test(rawText)) {
             console.log(`[Opt-out] ${senderId} sent STOP — marking opted_out`);
             await db.query(
@@ -5322,17 +5330,27 @@ app.get("/api/ai/blast-detail/:id", async (req, res) => {
   const bid = getBid(req);
   try {
     const { rows } = await db.query(
-      `SELECT recipient_phone, status, error_code, error_message, sent_at, updated_at
-       FROM broadcast_messages
-       WHERE blast_id=$1 AND business_id=$2
-       ORDER BY status, sent_at`,
+      `SELECT bm.recipient_phone, bm.status, bm.error_code, bm.error_message, bm.sent_at, bm.updated_at,
+              NULLIF(c.name, 'Unknown') AS customer_name, c.last_message, c.last_message_at
+       FROM broadcast_messages bm
+       LEFT JOIN bot_customers c ON c.id = bm.recipient_phone
+       WHERE bm.blast_id=$1 AND bm.business_id=$2
+       ORDER BY bm.status, bm.sent_at`,
       [req.params.id, bid]
     );
+    // A message counts as a reply to this blast only if it arrived after the blast was sent
+    for (const r of rows) {
+      const repliedAfter = r.last_message_at && r.sent_at && new Date(r.last_message_at) > new Date(r.sent_at);
+      r.reply    = repliedAfter ? r.last_message : null;
+      r.reply_at = repliedAfter ? r.last_message_at : null;
+      delete r.last_message; delete r.last_message_at;
+    }
     const failed    = rows.filter(r => r.status === "failed");
     const delivered = rows.filter(r => r.status === "delivered");
     const read      = rows.filter(r => r.status === "read");
     const pending   = rows.filter(r => r.status === "sent" || r.status === "queued");
-    res.json({ ok: true, failed, delivered, read, pending, total: rows.length });
+    const replies   = rows.filter(r => r.reply).length;
+    res.json({ ok: true, failed, delivered, read, pending, replies, total: rows.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
