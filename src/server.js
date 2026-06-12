@@ -3270,12 +3270,12 @@ async function getNotebookContext(bizId) {
 
 // ── Assign/update a student's batch ──────────────────────────────────────────
 app.patch("/api/customers/:id/batch", async (req, res) => {
-  const bid   = getBid(req);
   const { batch = "" } = req.body;
   try {
+    // Railway bot_customers has no business_id column — id (phone) is the key
     await db.query(
-      `UPDATE bot_customers SET batch=$1 WHERE id=$2 AND (business_id=$3 OR business_id='default')`,
-      [batch.trim(), req.params.id, bid]
+      `UPDATE bot_customers SET batch=$1 WHERE id=$2`,
+      [batch.trim(), req.params.id]
     );
     // Also sync to Supabase so the app's direct queries see it
     if (supabaseAdmin) {
@@ -5984,7 +5984,7 @@ async function checkClassReminders() {
         const { data } = await supabaseAdmin
           .from("bot_customers")
           .select("id, name")
-          .eq("business_id", sched.business_id)
+          .or(`business_id.eq.${sched.business_id},business_id.eq.default`)
           .eq("batch", sched.batch_name)
           .limit(500);
         customers = data || [];
