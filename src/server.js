@@ -4053,6 +4053,7 @@ app.post("/api/settings", async (req, res) => {
     "return_policy",                                  // customer-facing return / refund policy
     "payment_modes",                                  // COD / online / both
     "wa_template_name","wa_template_lang","wa_template_header_id", // WhatsApp re-engagement template
+    "sms_api_key",                                    // Fast2SMS key — SMS blast fallback
   ];
   const updates = { business_id: bid, updated_at: new Date().toISOString() };
   for (const key of allowed) {
@@ -5408,13 +5409,41 @@ app.get("/api/ai/customer-profile/:phone", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /api/ai/send-direct — send custom message or template to specific phone numbers
+// ── Fast2SMS sender — reaches numbers that never opted into WhatsApp ──────────
+// Fast2SMS bulkV2 expects 10-digit Indian numbers (no country code), comma-separated.
+async function sendSmsFast2(apiKey, phones, message) {
+  const numbers = phones
+    .map(p => String(p).replace(/\D/g, "").replace(/^91(?=\d{10}$)/, ""))
+    .filter(p => p.length === 10)
+    .join(",");
+  if (!numbers) return { sent: 0, failed: phones.length, error: "No valid 10-digit Indian numbers" };
+  const r = await fetch("https://www.fast2sms.com/dev/bulkV2", {
+    method : "POST",
+    headers: { authorization: apiKey, "Content-Type": "application/json" },
+    body   : JSON.stringify({ route: "q", message, numbers }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (d.return === true) return { sent: numbers.split(",").length, failed: 0 };
+  return { sent: 0, failed: phones.length, error: d.message || "Fast2SMS request failed" };
+}
+
+// POST /api/ai/send-direct — send custom message, template, or SMS to specific numbers
 app.post("/api/ai/send-direct", async (req, res) => {
   const bid = getBid(req);
-  const { phones, message, useTemplate, templateName, templateLang } = req.body || {};
+  const { phones, message, useTemplate, templateName, templateLang, channel } = req.body || {};
   if (!phones?.length) return res.status(400).json({ ok: false, error: "No phones provided" });
   try {
     const settings = await getSettings(bid);
+
+    // ── SMS channel — works even for numbers that never messaged the bot ─────
+    if (channel === "sms") {
+      if (!message?.trim()) return res.status(400).json({ ok: false, error: "Message text required for SMS" });
+      const smsKey = (settings.sms_api_key || "").trim();
+      if (!smsKey) return res.status(400).json({ ok: false, error: "Add your Fast2SMS API key in Settings first" });
+      const result = await sendSmsFast2(smsKey, phones, message.trim());
+      return res.json({ ok: result.sent > 0, channel: "sms", ...result, errors: result.error ? [result.error] : [] });
+    }
+
     const phoneId  = settings.wa_phone_id   || settings.phone_number_id || "";
     const token    = settings.wa_token      || settings.whatsapp_token  || "";
     if (!phoneId || !token) return res.status(400).json({ ok: false, error: "WhatsApp not configured in settings" });
