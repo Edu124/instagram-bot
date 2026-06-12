@@ -726,8 +726,40 @@ Reply:`;
       messages: [{ role: "user", content: prompt }],
       max_tokens: 100, temperature: 0.4,
     });
-    const replyText = resp.choices?.[0]?.message?.content?.trim();
+    let replyText = resp.choices?.[0]?.message?.content?.trim();
     if (!replyText) return;
+
+    // ── WhatsApp funnel: buying-intent comments get a private DM with a
+    // tappable wa.me link into the bot (links in comments are NOT clickable,
+    // links in DMs are — so the comment reply just points to the DM).
+    const botNumber  = (settings.whatsapp_number || "").replace(/\D/g, "");
+    const hasIntent  = /price|fees?|cost|admission|enrol|join|course|demo|class|batch|location|address|book|order|buy|deliver|kitn[ae]|kaha|kab|chahiye|details?|info/i.test(text);
+    let   dmSent     = false;
+    if (botNumber && hasIntent) {
+      const waText = encodeURIComponent("Hi! I saw your Instagram reel 👋");
+      const waLink = `https://wa.me/${botNumber}?text=${waText}`;
+      const dmMsg  =
+        `Hi @${username}! Thanks for your interest in ${businessName} 😊\n\n` +
+        `Tap the link below to chat with us directly on WhatsApp — instant replies for fees, details & enrollment:\n\n${waLink}`;
+      try {
+        const dmRes = await fetch(
+          `https://graph.facebook.com/v21.0/${igUserId}/messages`,
+          {
+            method : "POST",
+            headers: { "Content-Type": "application/json" },
+            body   : JSON.stringify({
+              recipient   : { comment_id: commentId },
+              message     : { text: dmMsg },
+              access_token: igToken,
+            }),
+          }
+        );
+        const dmData = await dmRes.json();
+        dmSent = !dmData.error;
+        if (dmData.error) console.warn("[IG Private Reply] API error:", dmData.error.message);
+      } catch (e) { console.warn("[IG Private Reply]", e.message); }
+      if (dmSent) replyText = `${replyText} 📩 Check your DM!`;
+    }
 
     // Post reply to Instagram comment
     const replyRes = await fetch(
