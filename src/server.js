@@ -3864,7 +3864,7 @@ app.get("/api/tracking/:awb", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/api/promote/segment", async (req, res) => {
   const bid = getBid(req);
-  const { segment = "all", message, productIds = [], useTemplate = false, customTargets = null } = req.body;
+  const { segment = "all", message, productIds = [], useTemplate = false, customTargets = null, channel = "whatsapp" } = req.body;
   if (!message && !useTemplate) return res.status(400).json({ error: "message required" });
 
   const numInfo = await waNumbers.getByBusinessId(bid);
@@ -3948,6 +3948,20 @@ app.post("/api/promote/segment", async (req, res) => {
     const skipped = targets.filter(c => recentSet.has(c.id)).length;
     finalTargets   = targets.filter(c => !recentSet.has(c.id));
     if (skipped > 0) console.log(`[Segment] 7-day cooldown: skipping ${skipped} students who received template recently`);
+  }
+
+  // ── SMS channel — reach numbers that never messaged the bot ─────────────────
+  if (channel === "sms") {
+    if (!message?.trim()) return res.status(400).json({ error: "SMS message text is required" });
+    const smsSettings = await getSettings(bid);
+    const smsKey = (smsSettings.sms_api_key || "").trim();
+    if (!smsKey) return res.status(400).json({ error: "Add your Fast2SMS API key in Settings → SMS Fallback before sending SMS blasts." });
+    const phones = finalTargets.map(c => c.id).filter(Boolean);
+    if (!phones.length) return res.status(400).json({ error: "No matching contacts found for this segment." });
+    const smsResult = await sendSmsFast2(smsKey, phones, message.trim());
+    await logBroadcast(bid, "segment_sms_" + segment, message.trim().slice(0, 150), smsResult.sent, false);
+    console.log(`[SMS Segment] ${segment}: sent=${smsResult.sent} failed=${smsResult.failed}`);
+    return res.json({ ok: true, queued: false, channel: "sms", sent: smsResult.sent, failed: smsResult.failed, total: phones.length, error: smsResult.error || null });
   }
 
   // Create broadcast log BEFORE blast so we have the ID for per-message tracking
