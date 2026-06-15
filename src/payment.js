@@ -11,7 +11,7 @@ const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "";
 const paymentLinks = new Map();
 
 // ── Create Razorpay payment link ──────────────────────────────────────────────
-async function createLink({ amount, customerName, mobile, description }) {
+async function createLink({ amount, customerName, mobile, description, notes = {} }) {
   if (!RAZORPAY_KEY_ID) {
     // Mock for development
     const mockId  = `mock_${Date.now()}`;
@@ -29,11 +29,12 @@ async function createLink({ amount, customerName, mobile, description }) {
       name : customerName,
       contact: `+91${mobile}`,
     },
-    notify: { sms: true, email: false },
+    notify         : { sms: true, email: false },
     reminder_enable: true,
-    expire_by: Math.floor(Date.now() / 1000) + 1800, // 30 minutes
+    expire_by      : Math.floor(Date.now() / 1000) + 86400, // 24 hours for subscription
     callback_url   : `${process.env.SERVER_URL}/webhook/payment`,
     callback_method: "get",
+    notes,
   });
 
   return new Promise((resolve, reject) => {

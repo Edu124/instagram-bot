@@ -123,9 +123,11 @@ async function setup() {
     )
   `);
 
-  // ── Add grace columns to existing subscriptions table (safe migration) ───────
+  // ── Add grace + receipt columns to existing subscriptions table ─────────────
   await db.query(`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS grace_period_start BIGINT NOT NULL DEFAULT 0`);
   await db.query(`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_reminder_sent  BIGINT NOT NULL DEFAULT 0`);
+  await db.query(`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS receipt_counter     INTEGER NOT NULL DEFAULT 0`);
+  await db.query(`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS sub_payment_link_id TEXT NOT NULL DEFAULT ''`);
 
   // ── Protect existing paid clients — give them grace so they aren't immediately suspended ──
   // Any active client whose paid_until is in the past gets grace_period_start = now

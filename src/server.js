@@ -921,19 +921,57 @@ app.get("/webhook/payment", async (req, res) => {
   const { razorpay_payment_link_id, razorpay_payment_link_status } = req.query;
   if (razorpay_payment_link_status === "paid" && razorpay_payment_link_id) {
     await handlePaymentSuccess(razorpay_payment_link_id);
+    await handleSubscriptionPayment(razorpay_payment_link_id, {});
   }
-  res.redirect(process.env.SUCCESS_URL || "/");
+  res.redirect(process.env.SUCCESS_URL || "https://selly.app/payment-success");
 });
 
 app.post("/webhook/payment", async (req, res) => {
-  // Razorpay webhook (POST) for auto order confirmation
   res.sendStatus(200);
   const { payload } = req.body;
   if (payload?.payment_link?.entity?.status === "paid") {
-    const linkId = payload.payment_link.entity.id;
-    await handlePaymentSuccess(linkId);
+    const linkId  = payload.payment_link.entity.id;
+    const payment = payload?.payment?.entity || {};
+    const notes   = payload.payment_link.entity.notes || {};
+    if (notes.type === "subscription") {
+      await handleSubscriptionPayment(linkId, { method: payment.method, paymentId: payment.id, amount: payment.amount / 100 });
+    } else {
+      await handlePaymentSuccess(linkId);
+    }
   }
 });
+
+// ── Handle subscription payment confirmed ────────────────────────────────────
+async function handleSubscriptionPayment(linkId, { method, paymentId, amount }) {
+  try {
+    // Find which business this link belongs to
+    const { rows } = await db.query(
+      `SELECT business_id, monthly_fee FROM subscriptions WHERE sub_payment_link_id=$1`, [linkId]
+    );
+    if (!rows.length) return;
+    const bid = rows[0].business_id;
+    const fee = amount || rows[0].monthly_fee || subscriptions.MONTHLY_FEE;
+
+    // Extend subscription by 30 days
+    const sub = await subscriptions.recordPayment(bid, {
+      amount   : fee,
+      paymentId: paymentId || linkId,
+      method   : method || "online",
+    });
+
+    console.log(`[Billing] Subscription payment confirmed for ${bid} — paid until ${new Date(sub.paidUntil).toDateString()}`);
+
+    // Send WhatsApp receipt
+    await sendSubscriptionReceipt(bid, {
+      amount   : fee,
+      method   : method || "online",
+      paymentId: paymentId || linkId,
+      periodEnd: sub.paidUntil,
+    });
+  } catch (e) {
+    console.error("[Billing] handleSubscriptionPayment error:", e.message);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MESSAGE ROUTER
@@ -4750,6 +4788,99 @@ app.post("/api/billing/payment", async (req, res) => {
   const { amount, paymentId, method } = req.body;
   res.json({ ok: true, subscription: await subscriptions.recordPayment(bid, { amount, paymentId, method }) });
 });
+
+// ── Create Razorpay subscription payment link ─────────────────────────────────
+app.post("/api/billing/create-payment-link", async (req, res) => {
+  const bid = getBid(req);
+  try {
+    const sub      = await subscriptions.getOrCreate(bid);
+    const settings = await getSettings(bid);
+    const numInfo  = await waNumbers.getByBusinessId(bid).catch(() => null);
+    const phone    = numInfo?.owner_phone || "";
+    const bizName  = (settings.business_name || "Selly Client").trim();
+    const fee      = sub.monthlyFee || subscriptions.MONTHLY_FEE;
+
+    const link = await payment.createLink({
+      amount     : fee,
+      customerName: bizName,
+      mobile     : phone.replace(/\D/g, "").replace(/^91/, ""),
+      description: `Selly Monthly Subscription — ${new Date().toLocaleString("en-IN", { month: "long", year: "numeric" })}`,
+      notes      : { type: "subscription", business_id: bid },
+    });
+
+    // Store link ID on subscription row so webhook can look it up
+    await db.query(
+      `UPDATE subscriptions SET sub_payment_link_id=$1, updated_at=$2 WHERE business_id=$3`,
+      [link.id, Date.now(), bid]
+    );
+
+    res.json({ ok: true, url: link.url, amount: fee });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Send WhatsApp subscription receipt ───────────────────────────────────────
+async function sendSubscriptionReceipt(bid, { amount, method, paymentId, periodEnd }) {
+  try {
+    const numInfo  = await waNumbers.getByBusinessId(bid).catch(() => null);
+    if (!numInfo?.owner_phone) return;
+
+    const settings   = await getSettings(bid);
+    const bizName    = (settings.business_name || "Selly Client").trim();
+    const phoneId    = numInfo.phone_number_id;
+    const token      = numInfo.token;
+    const ownerPhone = numInfo.owner_phone;
+
+    // Auto-increment receipt counter
+    const { rows } = await db.query(
+      `UPDATE subscriptions SET receipt_counter = receipt_counter + 1
+       WHERE business_id=$1 RETURNING receipt_counter`, [bid]
+    );
+    const counter     = rows[0]?.receipt_counter || 1;
+    const receiptNo   = `SELLY-${new Date().getFullYear()}-${String(counter).padStart(3, "0")}`;
+    const dateStr     = new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+    const periodStr   = periodEnd
+      ? new Date(periodEnd).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })
+      : "—";
+    const methodLabel = { upi: "UPI", card: "Card", netbanking: "Net Banking", wallet: "Wallet" }[method] || method || "Online";
+
+    const msg =
+`🧾 *PAYMENT RECEIPT*
+━━━━━━━━━━━━━━━━━━━━
+*SELLY*
+_by Codeforge AI_
+Ulhasnagar, Maharashtra
+
+━━━━━━━━━━━━━━━━━━━━
+*Receipt No:* ${receiptNo}
+*Date:* ${dateStr}
+
+━━━━━━━━━━━━━━━━━━━━
+*BILLED TO*
+${bizName}
+
+*DESCRIPTION*
+Selly Monthly Subscription
+Valid until: ${periodStr}
+
+━━━━━━━━━━━━━━━━━━━━
+*Amount Paid:* ₹${amount}
+*Payment Method:* ${methodLabel}
+*Status:* ✅ PAID
+
+━━━━━━━━━━━━━━━━━━━━
+_This is a computer generated receipt and does not require a signature._
+_Not a GST Invoice_
+*Selly by Codeforge AI*
+━━━━━━━━━━━━━━━━━━━━`;
+
+    await wa.send(ownerPhone, msg, phoneId, token);
+    console.log(`[Billing] Receipt ${receiptNo} sent to ${ownerPhone}`);
+  } catch (e) {
+    console.warn("[Billing] sendSubscriptionReceipt failed:", e.message);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // QUERY INBOX
