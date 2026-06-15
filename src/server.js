@@ -974,6 +974,25 @@ async function routeMessage(customerId, sess, message, name) {
   const lang  = sess.lang || "english";
   const bizId = sess.businessId || DEFAULT_BUSINESS_ID;
 
+  // ── Subscription suspension gate ──────────────────────────────────────────
+  // If the business hasn't paid and grace period elapsed, stop the bot silently.
+  // We send a one-time notice to the customer and do nothing else.
+  if (await subscriptions.isSuspended(bizId)) {
+    const suspendedKey = `suspended_notice_${customerId}`;
+    if (!sess[suspendedKey]) {
+      sess[suspendedKey] = true;
+      session.update(customerId, { [suspendedKey]: true });
+      const numInfo = await waNumbers.getByBusinessId(bizId).catch(() => null);
+      const phoneId = numInfo?.phone_number_id || DEFAULT_PHONE_ID;
+      const token   = numInfo?.token           || DEFAULT_WA_TOKEN;
+      await wa.send(customerId,
+        "⚠️ This store's WhatsApp bot is temporarily paused. Please contact the store directly for assistance.",
+        phoneId, token
+      ).catch(() => {});
+    }
+    return;
+  }
+
   // ── Track broadcast engagement (fire-and-forget) ──────────────────────────
   trackBroadcastEngagement(bizId).catch(() => {});
 
@@ -4707,8 +4726,24 @@ app.get("/api/billing/commissions", async (req, res) => {
 app.get("/api/billing/subscription", async (req, res) => {
   const bid  = getBid(req);
   const sub  = await subscriptions.get(bid);
-  const [active, days] = await Promise.all([subscriptions.isActive(bid), subscriptions.daysRemaining(bid)]);
-  res.json({ ...sub, isActive: active, daysRemaining: days });
+  const [active, days, suspended] = await Promise.all([
+    subscriptions.isActive(bid),
+    subscriptions.daysRemaining(bid),
+    subscriptions.isSuspended(bid),
+  ]);
+  const now = Date.now();
+  const nextDue = sub.status === "trial" ? sub.trialEnds : sub.paidUntil;
+  res.json({
+    ...sub,
+    isActive      : active,
+    isSuspended   : suspended,
+    daysRemaining : days,
+    nextDueDate   : nextDue,
+    graceDaysLeft : sub.graceDaysLeft || 0,
+    monthlyFee    : sub.monthlyFee || subscriptions.MONTHLY_FEE,
+    startDate     : sub.trialStarted || sub.createdAt,
+    trialDays     : 14,
+  });
 });
 app.post("/api/billing/payment", async (req, res) => {
   const bid = getBid(req);

@@ -54,13 +54,20 @@ async function getOrCreate(businessId) {
   }
 }
 
-// ── Check if active (trial or paid) ──────────────────────────────────────────
+// ── Check if active (trial, paid, or within grace period) ────────────────────
 async function isActive(businessId) {
   const sub = await getOrCreate(businessId);
   const now = Date.now();
-  if (sub.status === "trial")  return now < sub.trialEnds;
-  if (sub.status === "active") return now < sub.paidUntil;
+  if (sub.status === "trial")     return now < sub.trialEnds;
+  if (sub.status === "active")    return now < sub.paidUntil;
+  if (sub.status === "grace")     return true;  // grace period = still active, just overdue
   return false;
+}
+
+// ── Check if suspended (service must stop) ────────────────────────────────────
+async function isSuspended(businessId) {
+  const sub = await getOrCreate(businessId);
+  return sub.status === "suspended";
 }
 
 // ── Days remaining ────────────────────────────────────────────────────────────
@@ -124,23 +131,116 @@ async function getAll() {
   }
 }
 
-// ── Auto-expire check ─────────────────────────────────────────────────────────
+// ── Auto-expire + grace period + suspension check ────────────────────────────
 async function runExpiryCheck() {
-  const now = Date.now();
+  const now            = Date.now();
+  const graceCutoff    = now - GRACE_PERIOD_DAYS * 86400000;
+  const reminderWindow = 7 * 86400000;   // remind 7 days before due
+  const reminderCooldown = 23 * 60 * 60 * 1000; // max 1 reminder per 23h
+
   try {
+    // 1. Trial expired → expired
     await db.query(
       `UPDATE subscriptions SET status='expired', updated_at=$1
-       WHERE (status='trial' AND trial_ends < $1)
-          OR (status='active' AND paid_until < $1)`,
+       WHERE status='trial' AND trial_ends < $1`, [now]
+    );
+
+    // 2. Active but paid_until passed → move to grace (10-day buffer)
+    const { rows: newGrace } = await db.query(
+      `UPDATE subscriptions SET status='grace', grace_period_start=$1, updated_at=$1
+       WHERE status='active' AND paid_until < $1
+       RETURNING business_id, monthly_fee`,
       [now]
     );
+    for (const r of newGrace) {
+      console.log(`[Subscriptions] ${r.business_id} entered grace period — 10 days to pay ₹${r.monthly_fee}`);
+      await sendOwnerReminder(r.business_id, "grace_start", r.monthly_fee);
+    }
+
+    // 3. Grace period > 10 days → suspend service
+    const { rows: suspended } = await db.query(
+      `UPDATE subscriptions SET status='suspended', updated_at=$1
+       WHERE status='grace' AND grace_period_start > 0 AND grace_period_start < $2
+       RETURNING business_id`,
+      [now, graceCutoff]
+    );
+    for (const r of suspended) {
+      console.log(`[Subscriptions] ${r.business_id} SUSPENDED — grace period elapsed`);
+      await sendOwnerReminder(r.business_id, "suspended", 0);
+    }
+
+    // 4. Remind active clients 7 days before due — max once per 23h
+    await db.query(
+      `UPDATE subscriptions SET last_reminder_sent=$1, updated_at=$1
+       WHERE status='active'
+         AND paid_until > $1
+         AND paid_until < $2
+         AND (last_reminder_sent = 0 OR last_reminder_sent < $3)
+       RETURNING business_id, monthly_fee, paid_until`,
+      [now, now + reminderWindow, now - reminderCooldown]
+    ).then(async ({ rows }) => {
+      for (const r of rows) {
+        const daysLeft = Math.ceil((r.paid_until - now) / 86400000);
+        await sendOwnerReminder(r.business_id, "upcoming", r.monthly_fee, daysLeft);
+      }
+    }).catch(() => {});
+
+    // 5. Remind grace clients every 3 days
+    await db.query(
+      `UPDATE subscriptions SET last_reminder_sent=$1, updated_at=$1
+       WHERE status='grace'
+         AND (last_reminder_sent = 0 OR last_reminder_sent < $2)
+       RETURNING business_id, monthly_fee, grace_period_start`,
+      [now, now - 3 * 86400000]
+    ).then(async ({ rows }) => {
+      for (const r of rows) {
+        const daysInGrace = Math.floor((now - r.grace_period_start) / 86400000);
+        const daysLeft    = Math.max(0, GRACE_PERIOD_DAYS - daysInGrace);
+        await sendOwnerReminder(r.business_id, "grace_reminder", r.monthly_fee, daysLeft);
+      }
+    }).catch(() => {});
+
   } catch (e) {
     console.error("[Subscriptions] runExpiryCheck error:", e.message);
   }
 }
 
+// ── Send WhatsApp reminder to business owner ──────────────────────────────────
+async function sendOwnerReminder(businessId, type, fee, daysLeft) {
+  try {
+    const wa          = require("./whatsapp");
+    const waNumbers   = require("./wa_numbers");
+    const numInfo     = await waNumbers.getByBusinessId(businessId);
+    if (!numInfo?.owner_phone) return; // no owner phone on file
+
+    const ownerPhone  = numInfo.owner_phone;
+    const phoneId     = numInfo.phone_number_id;
+    const token       = numInfo.token;
+    const amount      = fee || MONTHLY_FEE;
+
+    let msg = "";
+    if (type === "upcoming") {
+      msg = `⏰ *Selly Subscription Reminder*\n\nHi! Your Selly subscription of ₹${amount} is due in ${daysLeft} day${daysLeft !== 1 ? "s" : ""}.\n\nPlease pay on time to keep your WhatsApp bot running without interruption.\n\nOpen the Selly app → Plan & Billing → Pay Now`;
+    } else if (type === "grace_start") {
+      msg = `🔔 *Selly Payment Due*\n\nYour Selly subscription of ₹${amount} is now overdue.\n\n⚠️ You have a *10-day grace period* — your bot will continue working until then.\n\nPlease pay within 10 days to avoid service suspension.\n\nOpen the Selly app → Plan & Billing → Pay Now`;
+    } else if (type === "grace_reminder") {
+      msg = `⚠️ *Selly Payment Reminder*\n\nYour subscription is overdue. Only *${daysLeft} day${daysLeft !== 1 ? "s" : ""}* left before your WhatsApp bot is paused.\n\nPay ₹${amount} now to avoid interruption.\n\nOpen the Selly app → Plan & Billing → Pay Now`;
+    } else if (type === "suspended") {
+      msg = `🚫 *Selly Service Suspended*\n\nYour Selly WhatsApp bot has been paused due to non-payment.\n\nYour customers will not receive any responses until payment is made.\n\nPay now to instantly resume service:\nOpen the Selly app → Plan & Billing → Pay Now`;
+    }
+
+    if (msg) await wa.send(ownerPhone, msg, phoneId, token);
+  } catch (e) {
+    console.warn("[Subscriptions] sendOwnerReminder failed:", e.message);
+  }
+}
+
 // ── Map DB row → subscription shape ──────────────────────────────────────────
 function _toSub(row) {
+  const now            = Date.now();
+  const gracePeriodStart = Number(row.grace_period_start) || 0;
+  const daysInGrace    = gracePeriodStart ? Math.floor((now - gracePeriodStart) / 86400000) : 0;
+  const graceDaysLeft  = Math.max(0, GRACE_PERIOD_DAYS - daysInGrace);
   return {
     businessId          : row.business_id,
     status              : row.status              || "trial",
@@ -151,17 +251,21 @@ function _toSub(row) {
     currentPeriodStart  : row.current_period_start|| 0,
     currentPeriodEnd    : row.current_period_end  || 0,
     paidUntil           : row.paid_until          || 0,
+    gracePeriodStart    : gracePeriodStart,
+    graceDaysLeft       : graceDaysLeft,
     createdAt           : row.created_at          || 0,
     updatedAt           : row.updated_at          || 0,
     paymentHistory      : row.payment_history     || [],
   };
 }
 
-// Start hourly expiry check
-setInterval(runExpiryCheck, 60 * 60 * 1000);
+const GRACE_PERIOD_DAYS = 10;
+
+// Run expiry check every 6 hours
+setInterval(runExpiryCheck, 6 * 60 * 60 * 1000);
 
 module.exports = {
-  getOrCreate, get, getAll, isActive, daysRemaining,
+  getOrCreate, get, getAll, isActive, isSuspended, daysRemaining,
   recordPayment, expire, runExpiryCheck,
-  MONTHLY_FEE, COMMISSION_PCT, COMMISSION_MIN,
+  MONTHLY_FEE, COMMISSION_PCT, COMMISSION_MIN, GRACE_PERIOD_DAYS,
 };

@@ -117,9 +117,24 @@ async function setup() {
       paid_until           BIGINT NOT NULL DEFAULT 0,
       created_at           BIGINT NOT NULL DEFAULT 0,
       updated_at           BIGINT NOT NULL DEFAULT 0,
-      payment_history      JSONB NOT NULL DEFAULT '[]'
+      payment_history      JSONB NOT NULL DEFAULT '[]',
+      grace_period_start   BIGINT NOT NULL DEFAULT 0,
+      last_reminder_sent   BIGINT NOT NULL DEFAULT 0
     )
   `);
+
+  // ── Add grace columns to existing subscriptions table (safe migration) ───────
+  await db.query(`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS grace_period_start BIGINT NOT NULL DEFAULT 0`);
+  await db.query(`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_reminder_sent  BIGINT NOT NULL DEFAULT 0`);
+
+  // ── Protect existing paid clients — give them grace so they aren't immediately suspended ──
+  // Any active client whose paid_until is in the past gets grace_period_start = now
+  // so they still have 10 days buffer before suspension
+  await db.query(`
+    UPDATE subscriptions
+    SET status = 'grace', grace_period_start = $1, updated_at = $1
+    WHERE status = 'active' AND paid_until > 0 AND paid_until < $1
+  `, [Date.now()]);
 
   // ── commissions ───────────────────────────────────────────────────────────────
   await db.query(`
