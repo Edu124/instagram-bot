@@ -3993,12 +3993,12 @@ app.post("/api/promote/segment", async (req, res) => {
   let finalTargets = targets;
   if (useTemplate && waTemplateName) {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const { data: cooldownRows = [] } = await supabaseAdmin
+    const { data: cooldownRows } = await supabaseAdmin
       .from("bot_customers")
       .select("id, template_last_sent_at")
       .or(`business_id.eq.${bid},business_id.eq.default`);
     const recentSet = new Set(
-      cooldownRows
+      (cooldownRows || [])
         .filter(r => r.template_last_sent_at && r.template_last_sent_at > sevenDaysAgo)
         .map(r => r.id)
     );
